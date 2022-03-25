@@ -60,7 +60,7 @@ func (e NetFilterType) String() string {
 	}
 }
 
-func InitNicIdMap(client *kubernetes.Clientset, namespace string) error {
+func InitNicIdMap(client kubernetes.Interface, namespace string) error {
 	cm, err := client.CoreV1().ConfigMaps(namespace).Get(
 		context.Background(),
 		SUPPORTED_NIC_ID_CONFIGMAP,

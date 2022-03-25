@@ -70,9 +70,9 @@ type Daemon struct {
 
 	client snclientset.Interface
 	// kubeClient allows interaction with Kubernetes, including the node we are running on.
-	kubeClient *kubernetes.Clientset
+	kubeClient kubernetes.Interface
 
-	mcClient *mcclientset.Clientset
+	mcClient mcclientset.Interface
 
 	nodeState *sriovnetworkv1.SriovNetworkNodeState
 
@@ -137,8 +137,8 @@ func (w writer) Write(p []byte) (n int, err error) {
 func New(
 	nodeName string,
 	client snclientset.Interface,
-	kubeClient *kubernetes.Clientset,
-	mcClient *mcclientset.Clientset,
+	kubeClient kubernetes.Interface,
+	mcClient mcclientset.Interface,
 	exitCh chan<- error,
 	stopCh <-chan struct{},
 	syncCh <-chan struct{},
@@ -356,9 +356,8 @@ func (dn *Daemon) processNextWorkItem() bool {
 			utilruntime.HandleError(fmt.Errorf("expected workItem in workqueue but got %#v", obj))
 			return nil
 		}
-		var err error
 
-		err = dn.nodeStateSyncHandler(key)
+		err := dn.nodeStateSyncHandler()
 		if err != nil {
 			// Ereport error message, and put the item back to work queue for retry.
 			dn.refreshCh <- Message{
@@ -425,9 +424,8 @@ func (dn *Daemon) operatorConfigChangeHandler(old, new interface{}) {
 	}
 }
 
-func (dn *Daemon) nodeStateSyncHandler(generation int64) error {
+func (dn *Daemon) nodeStateSyncHandler() error {
 	var err error
-	glog.V(0).Infof("nodeStateSyncHandler(): new generation is %d", generation)
 	// Get the latest NodeState
 	var latestState *sriovnetworkv1.SriovNetworkNodeState
 	latestState, err = dn.client.SriovnetworkV1().SriovNetworkNodeStates(namespace).Get(context.Background(), dn.name, metav1.GetOptions{})
@@ -436,6 +434,8 @@ func (dn *Daemon) nodeStateSyncHandler(generation int64) error {
 		return err
 	}
 	latest := latestState.GetGeneration()
+	glog.V(0).Infof("nodeStateSyncHandler(): new generation is %d", latest)
+
 	if dn.nodeState.GetGeneration() == latest {
 		glog.V(0).Infof("nodeStateSyncHandler(): Interface not changed")
 		if latestState.Status.LastSyncError != "" ||
