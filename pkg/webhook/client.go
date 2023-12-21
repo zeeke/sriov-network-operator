@@ -3,15 +3,15 @@ package webhook
 import (
 	"os"
 
-	"github.com/golang/glog"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	snclientset "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/client/clientset/versioned"
 )
 
-var snclient *snclientset.Clientset
+var snclient snclientset.Interface
 var kubeclient *kubernetes.Clientset
 
 func SetupInClusterClient() error {
@@ -27,7 +27,7 @@ func SetupInClusterClient() error {
 	}
 
 	if err != nil {
-		glog.Error("fail to setup client")
+		log.Log.Error(nil, "fail to setup client")
 		return err
 	}
 

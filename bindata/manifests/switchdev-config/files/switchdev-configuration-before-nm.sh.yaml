@@ -1,15 +1,15 @@
 mode: 0755
 overwrite: true
-path: "/usr/local/bin/switchdev-configuration-before-NM.sh"
+path: "/usr/local/bin/switchdev-configuration-before-nm.sh"
 contents:
   inline: |
     #!/bin/bash
     set -eux
-    input="/etc/sriov_config.json"
+    input="/etc/sriov-operator/sriov_config.json"
     UDEV_RULE_FILE='/etc/udev/rules.d/10-persistent-net.rules'
 
     if [ ! -f $input ]; then
-      echo "File /etc/sriov_config.json not exist."
+      echo "File /etc/sriov-operator/sriov_config.json not exist."
       exit
     fi
 
@@ -62,8 +62,8 @@ contents:
           echo $VfPciAddr > /sys/bus/pci/drivers/mlx5_core/unbind || true
         done
         # set flow steering mode before entering switchdev mode
-        echo "Set flow steering mode to dmfs"
-        devlink dev param set pci/${pci_addr} name flow_steering_mode value dmfs cmode runtime
+        echo "Set flow steering mode to smfs"
+        devlink dev param set pci/${pci_addr} name flow_steering_mode value smfs cmode runtime
 
         # set PF to switchdev mode
         echo "Set eswitch mode to switchdev"

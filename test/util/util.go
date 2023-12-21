@@ -10,7 +10,7 @@ import (
 	// "testing"
 	"time"
 
-	dptypes "github.com/intel/sriov-network-device-plugin/pkg/types"
+	dptypes "github.com/k8snetworkplumbingwg/sriov-network-device-plugin/pkg/types"
 	// "github.com/operator-framework/operator-sdk/pkg/test/e2eutil"
 	appsv1 "k8s.io/api/apps/v1"
 	// corev1 "k8s.io/api/core/v1"
@@ -26,7 +26,7 @@ import (
 
 var (
 	RetryInterval        = time.Second * 1
-	ApiTimeout           = time.Second * 10
+	APITimeout           = time.Second * 10
 	Timeout              = time.Second * 60
 	CleanupRetryInterval = time.Second * 1
 	CleanupTimeout       = time.Second * 5
@@ -35,7 +35,7 @@ var (
 func WaitForSriovNetworkNodeStateReady(nodeState *sriovnetworkv1.SriovNetworkNodeState, client client.Client, namespace, name string, retryInterval, timeout time.Duration) error {
 	time.Sleep(30 * time.Second)
 	err := wait.PollImmediate(retryInterval, timeout, func() (done bool, err error) {
-		ctx, cancel := goctx.WithTimeout(goctx.Background(), ApiTimeout)
+		ctx, cancel := goctx.WithTimeout(goctx.Background(), APITimeout)
 		defer cancel()
 		err = client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, nodeState)
 		if err != nil {
@@ -58,9 +58,8 @@ func WaitForSriovNetworkNodeStateReady(nodeState *sriovnetworkv1.SriovNetworkNod
 }
 
 func WaitForDaemonSetReady(ds *appsv1.DaemonSet, client client.Client, namespace, name string, retryInterval, timeout time.Duration) error {
-
 	err := wait.PollImmediate(retryInterval, timeout, func() (done bool, err error) {
-		ctx, cancel := goctx.WithTimeout(goctx.Background(), ApiTimeout)
+		ctx, cancel := goctx.WithTimeout(goctx.Background(), APITimeout)
 		defer cancel()
 		err = client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, ds)
 		if err != nil {
@@ -84,9 +83,8 @@ func WaitForDaemonSetReady(ds *appsv1.DaemonSet, client client.Client, namespace
 }
 
 func WaitForNamespacedObject(obj client.Object, client client.Client, namespace, name string, retryInterval, timeout time.Duration) error {
-
 	err := wait.PollImmediate(retryInterval, timeout, func() (done bool, err error) {
-		ctx, cancel := goctx.WithTimeout(goctx.Background(), ApiTimeout)
+		ctx, cancel := goctx.WithTimeout(goctx.Background(), APITimeout)
 		defer cancel()
 		err = client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj)
 		if err != nil {
@@ -106,9 +104,8 @@ func WaitForNamespacedObject(obj client.Object, client client.Client, namespace,
 }
 
 func WaitForNamespacedObjectDeleted(obj client.Object, client client.Client, namespace, name string, retryInterval, timeout time.Duration) error {
-
 	err := wait.PollImmediate(retryInterval, timeout, func() (done bool, err error) {
-		ctx, cancel := goctx.WithTimeout(goctx.Background(), ApiTimeout)
+		ctx, cancel := goctx.WithTimeout(goctx.Background(), APITimeout)
 		defer cancel()
 		err = client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj)
 		if err != nil {
@@ -146,40 +143,6 @@ func GenerateSriovNetworkCRs(namespace string, specs map[string]sriovnetworkv1.S
 	return crs
 }
 
-func GenerateExpectedNetConfig(cr *sriovnetworkv1.SriovNetwork) string {
-	spoofchk := ""
-	trust := ""
-	state := ""
-	ipam := "{}"
-
-	if cr.Spec.Trust == "on" {
-		trust = `"trust":"on",`
-	} else if cr.Spec.Trust == "off" {
-		trust = `"trust":"off",`
-	}
-
-	if cr.Spec.SpoofChk == "on" {
-		spoofchk = `"spoofchk":"on",`
-	} else if cr.Spec.SpoofChk == "off" {
-		spoofchk = `"spoofchk":"off",`
-	}
-
-	if cr.Spec.LinkState == "auto" {
-		state = `"link_state":"auto",`
-	} else if cr.Spec.LinkState == "enable" {
-		state = `"link_state":"enable",`
-	} else if cr.Spec.LinkState == "disable" {
-		state = `"link_state":"disable",`
-	}
-
-	if cr.Spec.IPAM != "" {
-		ipam = cr.Spec.IPAM
-	}
-	vlanQoS := cr.Spec.VlanQoS
-
-	return fmt.Sprintf(`{ "cniVersion":"0.3.1", "name":"%s","type":"sriov","vlan":%d,%s%s%s"vlanQoS":%d,"ipam":%s }`, cr.GetName(), cr.Spec.Vlan, spoofchk, trust, state, vlanQoS, ipam)
-}
-
 func GenerateSriovIBNetworkCRs(namespace string, specs map[string]sriovnetworkv1.SriovIBNetworkSpec) map[string]sriovnetworkv1.SriovIBNetwork {
 	crs := make(map[string]sriovnetworkv1.SriovIBNetwork)
 
@@ -197,23 +160,6 @@ func GenerateSriovIBNetworkCRs(namespace string, specs map[string]sriovnetworkv1
 		}
 	}
 	return crs
-}
-
-func GenerateExpectedIBNetConfig(cr *sriovnetworkv1.SriovIBNetwork) string {
-	state := ""
-	ipam := "{}"
-
-	if cr.Spec.LinkState == "auto" {
-		state = `"link_state":"auto",`
-	} else if cr.Spec.LinkState == "enable" {
-		state = `"link_state":"enable",`
-	} else if cr.Spec.LinkState == "disable" {
-		state = `"link_state":"disable",`
-	}
-	if cr.Spec.IPAM != "" {
-		ipam = cr.Spec.IPAM
-	}
-	return fmt.Sprintf(`{ "cniVersion":"0.3.1", "name":"%s","type":"ib-sriov",%s"ipam":%s }`, cr.GetName(), state, ipam)
 }
 
 func ValidateDevicePluginConfig(nps []*sriovnetworkv1.SriovNetworkNodePolicy, rawConfig string) error {

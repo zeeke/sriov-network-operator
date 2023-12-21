@@ -23,7 +23,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	uns "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,21 +34,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	machinev1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
+
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 	apply "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/apply"
+	constants "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/consts"
 	render "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/render"
-	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/utils"
-	constants "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/utils"
+	utils "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/utils"
 )
 
 // SriovOperatorConfigReconciler reconciles a SriovOperatorConfig object
 type SriovOperatorConfigReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme           *runtime.Scheme
+	OpenshiftContext *utils.OpenshiftContext
 }
-
-var injectorServiceCaCmVersion = ""
-var webhookServiceCaCmVersion = ""
 
 //+kubebuilder:rbac:groups=sriovnetwork.openshift.io,resources=sriovoperatorconfigs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=sriovnetwork.openshift.io,resources=sriovoperatorconfigs/status,verbs=get;update;patch
@@ -74,30 +73,31 @@ func (r *SriovOperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 		logger.Info("SR-IOV Network Resource Injector and Operator Webhook are disabled.")
 	}
 	defaultConfig := &sriovnetworkv1.SriovOperatorConfig{}
-	err := r.Get(context.TODO(), types.NamespacedName{
-		Name: constants.DEFAULT_CONFIG_NAME, Namespace: namespace}, defaultConfig)
+	err := r.Get(ctx, types.NamespacedName{
+		Name: constants.DefaultConfigName, Namespace: namespace}, defaultConfig)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			singleNode, err := utils.IsSingleNodeCluster(r.Client)
 			if err != nil {
-				return reconcile.Result{}, fmt.Errorf("Couldn't check the anount of nodes in the cluster")
+				return reconcile.Result{}, fmt.Errorf("couldn't get cluster single node status: %s", err)
 			}
 
 			// Default Config object not found, create it.
 			defaultConfig.SetNamespace(namespace)
-			defaultConfig.SetName(constants.DEFAULT_CONFIG_NAME)
+			defaultConfig.SetName(constants.DefaultConfigName)
 			defaultConfig.Spec = sriovnetworkv1.SriovOperatorConfigSpec{
 				EnableInjector:           func() *bool { b := enableAdmissionController; return &b }(),
 				EnableOperatorWebhook:    func() *bool { b := enableAdmissionController; return &b }(),
 				ConfigDaemonNodeSelector: map[string]string{},
 				LogLevel:                 2,
 				DisableDrain:             singleNode,
+				ConfigurationMode:        sriovnetworkv1.DaemonConfigurationMode,
 			}
 
-			err = r.Create(context.TODO(), defaultConfig)
+			err = r.Create(ctx, defaultConfig)
 			if err != nil {
 				logger.Error(err, "Failed to create default Operator Config", "Namespace",
-					namespace, "Name", constants.DEFAULT_CONFIG_NAME)
+					namespace, "Name", constants.DefaultConfigName)
 				return reconcile.Result{}, err
 			}
 			return reconcile.Result{}, nil
@@ -111,19 +111,30 @@ func (r *SriovOperatorConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	// Render and sync webhook objects
-	if err = r.syncWebhookObjs(defaultConfig); err != nil {
+	if err = r.syncWebhookObjs(ctx, defaultConfig); err != nil {
 		return reconcile.Result{}, err
 	}
 
 	// Sync SriovNetworkConfigDaemon objects
-	if err = r.syncConfigDaemonSet(defaultConfig); err != nil {
+	if err = r.syncConfigDaemonSet(ctx, defaultConfig); err != nil {
 		return reconcile.Result{}, err
 	}
 
-	if err = r.syncPluginDaemonSet(defaultConfig); err != nil {
+	if err = r.syncPluginDaemonSet(ctx, defaultConfig); err != nil {
 		return reconcile.Result{}, err
 	}
 
+	// For Openshift we need to create the systemd files using a machine config
+	if utils.ClusterType == utils.ClusterTypeOpenshift {
+		// TODO: add support for hypershift as today there is no MCO on hypershift clusters
+		if r.OpenshiftContext.IsHypershift() {
+			return ctrl.Result{}, fmt.Errorf("systemd mode is not supported on hypershift")
+		}
+
+		if err = r.syncOpenShiftSystemdService(ctx, defaultConfig); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
 	return reconcile.Result{RequeueAfter: constants.ResyncPeriod}, nil
 }
 
@@ -136,18 +147,15 @@ func (r *SriovOperatorConfigReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Complete(r)
 }
 
-func (r *SriovOperatorConfigReconciler) syncPluginDaemonSet(dc *sriovnetworkv1.SriovOperatorConfig) error {
+func (r *SriovOperatorConfigReconciler) syncPluginDaemonSet(ctx context.Context, dc *sriovnetworkv1.SriovOperatorConfig) error {
 	logger := log.Log.WithName("syncConfigDaemonset")
 	logger.Info("Start to sync SRIOV plugin daemonsets nodeSelector")
 	ds := &appsv1.DaemonSet{}
 
 	names := []string{"sriov-cni", "sriov-device-plugin"}
 
-	if len(dc.Spec.ConfigDaemonNodeSelector) == 0 {
-		return nil
-	}
 	for _, name := range names {
-		err := r.Client.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: namespace}, ds)
+		err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, ds)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
@@ -155,8 +163,12 @@ func (r *SriovOperatorConfigReconciler) syncPluginDaemonSet(dc *sriovnetworkv1.S
 			logger.Error(err, "Couldn't get daemonset", "name", name)
 			return err
 		}
-		ds.Spec.Template.Spec.NodeSelector = dc.Spec.ConfigDaemonNodeSelector
-		err = r.Client.Update(context.TODO(), ds)
+		if len(dc.Spec.ConfigDaemonNodeSelector) == 0 {
+			ds.Spec.Template.Spec.NodeSelector = GetDefaultNodeSelector()
+		} else {
+			ds.Spec.Template.Spec.NodeSelector = dc.Spec.ConfigDaemonNodeSelector
+		}
+		err = r.Client.Update(ctx, ds)
 		if err != nil {
 			logger.Error(err, "Couldn't update daemonset", "name", name)
 			return err
@@ -166,11 +178,9 @@ func (r *SriovOperatorConfigReconciler) syncPluginDaemonSet(dc *sriovnetworkv1.S
 	return nil
 }
 
-func (r *SriovOperatorConfigReconciler) syncConfigDaemonSet(dc *sriovnetworkv1.SriovOperatorConfig) error {
+func (r *SriovOperatorConfigReconciler) syncConfigDaemonSet(ctx context.Context, dc *sriovnetworkv1.SriovOperatorConfig) error {
 	logger := log.Log.WithName("syncConfigDaemonset")
 	logger.Info("Start to sync config daemonset")
-	// var err error
-	objs := []*uns.Unstructured{}
 
 	data := render.MakeRenderData()
 	data.Data["Image"] = os.Getenv("SRIOV_NETWORK_CONFIG_DAEMON_IMAGE")
@@ -179,6 +189,14 @@ func (r *SriovOperatorConfigReconciler) syncConfigDaemonSet(dc *sriovnetworkv1.S
 	data.Data["SRIOVInfiniBandCNIImage"] = os.Getenv("SRIOV_INFINIBAND_CNI_IMAGE")
 	data.Data["ReleaseVersion"] = os.Getenv("RELEASEVERSION")
 	data.Data["ClusterType"] = utils.ClusterType
+	data.Data["DevMode"] = os.Getenv("DEV_MODE")
+	data.Data["ImagePullSecrets"] = GetImagePullSecrets()
+	if dc.Spec.ConfigurationMode == sriovnetworkv1.SystemdConfigurationMode {
+		data.Data["UsedSystemdMode"] = true
+	} else {
+		data.Data["UsedSystemdMode"] = false
+	}
+
 	envCniBinPath := os.Getenv("SRIOV_CNI_BIN_PATH")
 	if envCniBinPath == "" {
 		data.Data["CNIBinPath"] = "/var/lib/cni/bin"
@@ -186,7 +204,7 @@ func (r *SriovOperatorConfigReconciler) syncConfigDaemonSet(dc *sriovnetworkv1.S
 		logger.Info("New cni bin found", "CNIBinPath", envCniBinPath)
 		data.Data["CNIBinPath"] = envCniBinPath
 	}
-	objs, err := render.RenderDir(constants.CONFIG_DAEMON_PATH, &data)
+	objs, err := render.RenderDir(constants.ConfigDaemonPath, &data)
 	if err != nil {
 		logger.Error(err, "Fail to render config daemon manifests")
 		return err
@@ -208,7 +226,7 @@ func (r *SriovOperatorConfigReconciler) syncConfigDaemonSet(dc *sriovnetworkv1.S
 				return err
 			}
 		}
-		err = r.syncK8sResource(dc, obj)
+		err = r.syncK8sResource(ctx, dc, obj)
 		if err != nil {
 			logger.Error(err, "Couldn't sync SR-IoV daemons objects")
 			return err
@@ -217,7 +235,7 @@ func (r *SriovOperatorConfigReconciler) syncConfigDaemonSet(dc *sriovnetworkv1.S
 	return nil
 }
 
-func (r *SriovOperatorConfigReconciler) syncWebhookObjs(dc *sriovnetworkv1.SriovOperatorConfig) error {
+func (r *SriovOperatorConfigReconciler) syncWebhookObjs(ctx context.Context, dc *sriovnetworkv1.SriovOperatorConfig) error {
 	logger := log.Log.WithName("syncWebhookObjs")
 	logger.Info("Start to sync webhook objects")
 
@@ -231,6 +249,15 @@ func (r *SriovOperatorConfigReconciler) syncWebhookObjs(dc *sriovnetworkv1.Sriov
 		data.Data["ReleaseVersion"] = os.Getenv("RELEASEVERSION")
 		data.Data["ClusterType"] = utils.ClusterType
 		data.Data["CaBundle"] = os.Getenv("WEBHOOK_CA_BUNDLE")
+		data.Data["DevMode"] = os.Getenv("DEV_MODE")
+		data.Data["ImagePullSecrets"] = GetImagePullSecrets()
+
+		data.Data["ExternalControlPlane"] = false
+		if r.OpenshiftContext.IsOpenshiftCluster() {
+			external := r.OpenshiftContext.IsHypershift()
+			data.Data["ExternalControlPlane"] = external
+		}
+
 		objs, err := render.RenderDir(path, &data)
 		if err != nil {
 			logger.Error(err, "Fail to render webhook manifests")
@@ -238,9 +265,9 @@ func (r *SriovOperatorConfigReconciler) syncWebhookObjs(dc *sriovnetworkv1.Sriov
 		}
 
 		// Delete injector webhook
-		if *dc.Spec.EnableInjector != true && path == constants.INJECTOR_WEBHOOK_PATH {
+		if !*dc.Spec.EnableInjector && path == constants.InjectorWebHookPath {
 			for _, obj := range objs {
-				err = r.deleteWebhookObject(obj)
+				err = r.deleteWebhookObject(ctx, obj)
 				if err != nil {
 					return err
 				}
@@ -251,9 +278,9 @@ func (r *SriovOperatorConfigReconciler) syncWebhookObjs(dc *sriovnetworkv1.Sriov
 			continue
 		}
 		// Delete operator webhook
-		if *dc.Spec.EnableOperatorWebhook != true && path == constants.OPERATOR_WEBHOOK_PATH {
+		if !*dc.Spec.EnableOperatorWebhook && path == constants.OperatorWebHookPath {
 			for _, obj := range objs {
-				err = r.deleteWebhookObject(obj)
+				err = r.deleteWebhookObject(ctx, obj)
 				if err != nil {
 					return err
 				}
@@ -266,7 +293,7 @@ func (r *SriovOperatorConfigReconciler) syncWebhookObjs(dc *sriovnetworkv1.Sriov
 
 		// Sync Webhook
 		for _, obj := range objs {
-			err = r.syncK8sResource(dc, obj)
+			err = r.syncK8sResource(ctx, dc, obj)
 			if err != nil {
 				logger.Error(err, "Couldn't sync webhook objects")
 				return err
@@ -277,31 +304,98 @@ func (r *SriovOperatorConfigReconciler) syncWebhookObjs(dc *sriovnetworkv1.Sriov
 	return nil
 }
 
-func (r *SriovOperatorConfigReconciler) deleteWebhookObject(obj *uns.Unstructured) error {
-	if err := r.deleteK8sResource(obj); err != nil {
+func (r *SriovOperatorConfigReconciler) deleteWebhookObject(ctx context.Context, obj *uns.Unstructured) error {
+	if err := r.deleteK8sResource(ctx, obj); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (r *SriovOperatorConfigReconciler) deleteK8sResource(in *uns.Unstructured) error {
-	if err := apply.DeleteObject(context.TODO(), r.Client, in); err != nil {
+func (r *SriovOperatorConfigReconciler) deleteK8sResource(ctx context.Context, in *uns.Unstructured) error {
+	if err := apply.DeleteObject(ctx, r.Client, in); err != nil {
 		return fmt.Errorf("failed to delete object %v with err: %v", in, err)
 	}
 	return nil
 }
 
-func (r *SriovOperatorConfigReconciler) syncK8sResource(cr *sriovnetworkv1.SriovOperatorConfig, in *uns.Unstructured) error {
+func (r *SriovOperatorConfigReconciler) syncK8sResource(ctx context.Context, cr *sriovnetworkv1.SriovOperatorConfig, in *uns.Unstructured) error {
 	switch in.GetKind() {
-	case "ClusterRole", "ClusterRoleBinding", "MutatingWebhookConfiguration", "ValidatingWebhookConfiguration":
+	case clusterRoleResourceName, clusterRoleBindingResourceName, mutatingWebhookConfigurationCRDName, validatingWebhookConfigurationCRDName, machineConfigCRDName:
 	default:
 		// set owner-reference only for namespaced objects
 		if err := controllerutil.SetControllerReference(cr, in, r.Scheme); err != nil {
 			return err
 		}
 	}
-	if err := apply.ApplyObject(context.TODO(), r.Client, in); err != nil {
+	if err := apply.ApplyObject(ctx, r.Client, in); err != nil {
 		return fmt.Errorf("failed to apply object %v with err: %v", in, err)
 	}
+	return nil
+}
+
+// syncOpenShiftSystemdService creates the Machine Config to deploy the systemd service on openshift ONLY
+func (r *SriovOperatorConfigReconciler) syncOpenShiftSystemdService(ctx context.Context, cr *sriovnetworkv1.SriovOperatorConfig) error {
+	logger := log.Log.WithName("syncSystemdService")
+
+	if cr.Spec.ConfigurationMode != sriovnetworkv1.SystemdConfigurationMode {
+		obj := &machinev1.MachineConfig{}
+		err := r.Get(context.TODO(), types.NamespacedName{Name: constants.SystemdServiceOcpMachineConfigName}, obj)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+
+			logger.Error(err, "failed to get machine config for the sriov-systemd-service")
+			return err
+		}
+
+		logger.Info("Systemd service was deployed but the operator is now operating on daemonset mode, removing the machine config")
+		err = r.Delete(context.TODO(), obj)
+		if err != nil {
+			logger.Error(err, "failed to remove the systemd service machine config")
+			return err
+		}
+
+		return nil
+	}
+
+	logger.Info("Start to sync config systemd machine config for openshift")
+	data := render.MakeRenderData()
+	data.Data["LogLevel"] = cr.Spec.LogLevel
+	objs, err := render.RenderDir(constants.SystemdServiceOcpPath, &data)
+	if err != nil {
+		logger.Error(err, "Fail to render config daemon manifests")
+		return err
+	}
+
+	// Sync machine config
+	return r.setLabelInsideObject(ctx, cr, objs)
+}
+
+func (r SriovOperatorConfigReconciler) setLabelInsideObject(ctx context.Context, cr *sriovnetworkv1.SriovOperatorConfig, objs []*uns.Unstructured) error {
+	logger := log.Log.WithName("setLabelInsideObject")
+	for _, obj := range objs {
+		if obj.GetKind() == machineConfigCRDName && len(cr.Spec.ConfigDaemonNodeSelector) > 0 {
+			scheme := kscheme.Scheme
+			mc := &machinev1.ControllerConfig{}
+			err := scheme.Convert(obj, mc, nil)
+			if err != nil {
+				logger.Error(err, "Fail to convert to MachineConfig")
+				return err
+			}
+			mc.Labels = cr.Spec.ConfigDaemonNodeSelector
+			err = scheme.Convert(mc, obj, nil)
+			if err != nil {
+				logger.Error(err, "Fail to convert to Unstructured")
+				return err
+			}
+		}
+		err := r.syncK8sResource(ctx, cr, obj)
+		if err != nil {
+			logger.Error(err, "Couldn't sync SR-IoV daemons objects")
+			return err
+		}
+	}
+
 	return nil
 }

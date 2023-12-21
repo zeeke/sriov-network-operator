@@ -17,14 +17,47 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
+	"strings"
 
-	constants "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/utils"
+	constants "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/consts"
 )
 
 var webhooks = map[string](string){
-	constants.INJECTOR_WEBHOOK_NAME: constants.INJECTOR_WEBHOOK_PATH,
-	constants.OPERATOR_WEBHOOK_NAME: constants.OPERATOR_WEBHOOK_PATH,
+	constants.InjectorWebHookName: constants.InjectorWebHookPath,
+	constants.OperatorWebHookName: constants.OperatorWebHookPath,
 }
 
+const (
+	clusterRoleResourceName               = "ClusterRole"
+	clusterRoleBindingResourceName        = "ClusterRoleBinding"
+	mutatingWebhookConfigurationCRDName   = "MutatingWebhookConfiguration"
+	validatingWebhookConfigurationCRDName = "ValidatingWebhookConfiguration"
+	machineConfigCRDName                  = "MachineConfig"
+)
+
 var namespace = os.Getenv("NAMESPACE")
+
+func GetImagePullSecrets() []string {
+	imagePullSecrets := os.Getenv("IMAGE_PULL_SECRETS")
+	if imagePullSecrets != "" {
+		return strings.Split(imagePullSecrets, ",")
+	} else {
+		return []string{}
+	}
+}
+
+func formatJSON(str string) (string, error) {
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, []byte(str), "", "    "); err != nil {
+		return "", err
+	}
+	return prettyJSON.String(), nil
+}
+
+func GetDefaultNodeSelector() map[string]string {
+	return map[string]string{"node-role.kubernetes.io/worker": "",
+		"kubernetes.io/os": "linux"}
+}

@@ -6,26 +6,32 @@ import (
 	"strings"
 	"time"
 
-	sriovv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 	k8sv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/pointer"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	sriovv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 	testclient "github.com/k8snetworkplumbingwg/sriov-network-operator/test/util/client"
 )
 
 // Test is the namespace to be use for testing
 const Test = "sriov-conformance-testing"
 
+var inhibitSecurityAdmissionLabels = map[string]string{
+	"pod-security.kubernetes.io/audit":               "privileged",
+	"pod-security.kubernetes.io/enforce":             "privileged",
+	"pod-security.kubernetes.io/warn":                "privileged",
+	"security.openshift.io/scc.podSecurityLabelSync": "false",
+}
+
 // WaitForDeletion waits until the namespace will be removed from the cluster
 func WaitForDeletion(cs *testclient.ClientSet, nsName string, timeout time.Duration) error {
 	return wait.PollImmediate(time.Second, timeout, func() (bool, error) {
 		_, err := cs.Namespaces().Get(context.Background(), nsName, metav1.GetOptions{})
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			return true, nil
 		}
 		return false, nil
@@ -37,7 +43,8 @@ func WaitForDeletion(cs *testclient.ClientSet, nsName string, timeout time.Durat
 func Create(namespace string, cs *testclient.ClientSet) error {
 	_, err := cs.Namespaces().Create(context.Background(), &k8sv1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: namespace,
+			Name:   namespace,
+			Labels: inhibitSecurityAdmissionLabels,
 		}}, metav1.CreateOptions{})
 
 	if k8serrors.IsAlreadyExists(err) {
@@ -46,12 +53,17 @@ func Create(namespace string, cs *testclient.ClientSet) error {
 	return err
 }
 
-// DeleteAndWait deletes a namespace and waits until delete
+// DeleteAndWait deletes a namespace and waits until it is deleted
 func DeleteAndWait(cs *testclient.ClientSet, namespace string, timeout time.Duration) error {
 	err := cs.Namespaces().Delete(context.Background(), namespace, metav1.DeleteOptions{})
-	if err != nil {
-		return err
+	if k8serrors.IsNotFound(err) {
+		return nil
 	}
+
+	if err != nil {
+		return fmt.Errorf("failed to delete namespace [%s]: %w", namespace, err)
+	}
+
 	return WaitForDeletion(cs, namespace, timeout)
 }
 
@@ -70,7 +82,7 @@ func CleanPods(namespace string, cs *testclient.ClientSet) error {
 		GracePeriodSeconds: pointer.Int64Ptr(0),
 	}, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("Failed to delete pods %v", err)
+		return fmt.Errorf("failed to delete pods %v", err)
 	}
 	return err
 }
@@ -89,7 +101,7 @@ func CleanPolicies(operatorNamespace string, cs *testclient.ClientSet) error {
 		if p.Name != "default" && strings.HasPrefix(p.Name, "test-") {
 			err := cs.Delete(context.Background(), &p)
 			if err != nil {
-				return fmt.Errorf("Failed to delete policy %v", err)
+				return fmt.Errorf("failed to delete policy %v", err)
 			}
 		}
 	}
@@ -109,7 +121,7 @@ func CleanNetworks(operatorNamespace string, cs *testclient.ClientSet) error {
 		if strings.HasPrefix(n.Name, "test-") {
 			err := cs.Delete(context.Background(), &n)
 			if err != nil {
-				return fmt.Errorf("Failed to delete network %v", err)
+				return fmt.Errorf("failed to delete network %v", err)
 			}
 		}
 	}

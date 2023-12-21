@@ -8,17 +8,17 @@ import (
 	"time"
 
 	netattdefv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	dynclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
-	util "github.com/k8snetworkplumbingwg/sriov-network-operator/test/util"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/test/util"
 )
 
 var _ = Describe("SriovIBNetwork Controller", func() {
@@ -48,7 +48,7 @@ var _ = Describe("SriovIBNetwork Controller", func() {
 		DescribeTable("should be possible to create/delete net-att-def",
 			func(cr sriovnetworkv1.SriovIBNetwork) {
 				var err error
-				expect := util.GenerateExpectedIBNetConfig(&cr)
+				expect := generateExpectedIBNetConfig(&cr)
 
 				By("Create the SriovIBNetwork Custom Resource")
 				// get global framework variables
@@ -105,7 +105,7 @@ var _ = Describe("SriovIBNetwork Controller", func() {
 					Expect(k8sClient.Delete(goctx.TODO(), &old)).To(Succeed())
 				}()
 				found := &sriovnetworkv1.SriovIBNetwork{}
-				expect := util.GenerateExpectedIBNetConfig(&new)
+				expect := generateExpectedIBNetConfig(&new)
 
 				retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 					// Retrieve the latest version of SriovIBNetwork before attempting update
@@ -162,7 +162,7 @@ var _ = Describe("SriovIBNetwork Controller", func() {
 				},
 			}
 			var err error
-			expect := util.GenerateExpectedIBNetConfig(&cr)
+			expect := generateExpectedIBNetConfig(&cr)
 
 			err = k8sClient.Create(goctx.TODO(), &cr)
 			Expect(err).NotTo(HaveOccurred())
@@ -190,4 +190,76 @@ var _ = Describe("SriovIBNetwork Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
+
+	Context("When the target NetworkNamespace doesn't exists", func() {
+		It("should create the NetAttachDef when the namespace is created", func() {
+			cr := sriovnetworkv1.SriovIBNetwork{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-missing-namespace",
+					Namespace: testNamespace,
+				},
+				Spec: sriovnetworkv1.SriovIBNetworkSpec{
+					NetworkNamespace: "ib-ns-xxx",
+					ResourceName:     "resource_missing_namespace",
+					IPAM:             `{"type":"dhcp"}`,
+				},
+			}
+			var err error
+			expect := generateExpectedIBNetConfig(&cr)
+
+			err = k8sClient.Create(goctx.TODO(), &cr)
+			Expect(err).NotTo(HaveOccurred())
+
+			DeferCleanup(func() {
+				err = k8sClient.Delete(goctx.TODO(), &cr)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			// Sleep 3 seconds to be sure the Reconcile loop has been invoked. This can be improved by exposing some information (e.g. the error)
+			// in the SriovIBNetwork.Status field.
+			time.Sleep(3 * time.Second)
+
+			netAttDef := &netattdefv1.NetworkAttachmentDefinition{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: cr.GetName(), Namespace: "ib-ns-xxx"}, netAttDef)
+			Expect(err).To(HaveOccurred())
+
+			err = k8sClient.Create(goctx.TODO(), &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: "ib-ns-xxx"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = util.WaitForNamespacedObject(netAttDef, k8sClient, "ib-ns-xxx", cr.GetName(), util.RetryInterval, util.Timeout)
+			Expect(err).NotTo(HaveOccurred())
+
+			anno := netAttDef.GetAnnotations()
+			Expect(anno["k8s.v1.cni.cncf.io/resourceName"]).To(Equal("openshift.io/" + cr.Spec.ResourceName))
+			Expect(strings.TrimSpace(netAttDef.Spec.Config)).To(Equal(expect))
+		})
+	})
 })
+
+func generateExpectedIBNetConfig(cr *sriovnetworkv1.SriovIBNetwork) string {
+	ipam := emptyCurls
+	state := getLinkState(cr.Spec.LinkState)
+
+	if cr.Spec.IPAM != "" {
+		ipam = cr.Spec.IPAM
+	}
+	configStr, err := formatJSON(fmt.Sprintf(`{ "cniVersion":"0.3.1", "name":"%s","type":"ib-sriov",%s"ipam":%s }`, cr.GetName(), state, ipam))
+	if err != nil {
+		panic(err)
+	}
+	return configStr
+}
+
+func getLinkState(state string) string {
+	st := ""
+	if state == sriovnetworkv1.SriovCniStateAuto {
+		st = `"link_state":"auto",`
+	} else if state == sriovnetworkv1.SriovCniStateEnable {
+		st = `"link_state":"enable",`
+	} else if state == sriovnetworkv1.SriovCniStateDisable {
+		st = `"link_state":"disable",`
+	}
+	return st
+}

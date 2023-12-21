@@ -3,25 +3,18 @@ package utils
 import (
 	"context"
 
-	snclientset "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/client/clientset/versioned"
 	admv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	conf "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
+	snclientset "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/client/clientset/versioned"
+	constants "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/consts"
 )
 
 var shutdownLog = ctrl.Log.WithName("shutdown")
-
-var sriovnetworksGVR = schema.GroupVersionResource{
-	Group:    "sriovnetwork.openshift.io",
-	Version:  "v1",
-	Resource: "sriovnetworks",
-}
 
 var failurePolicyIgnore = admv1.Ignore
 
@@ -75,7 +68,7 @@ func updateWebhooks() {
 
 func updateValidatingWebhook(c *kubernetes.Clientset) {
 	validatingWebhookClient := c.AdmissionregistrationV1().ValidatingWebhookConfigurations()
-	webhook, err := validatingWebhookClient.Get(context.TODO(), OPERATOR_WEBHOOK_NAME, metav1.GetOptions{})
+	webhook, err := validatingWebhookClient.Get(context.TODO(), constants.OperatorWebHookName, metav1.GetOptions{})
 	if err != nil {
 		shutdownLog.Error(err, "Error getting webhook")
 	}
@@ -88,7 +81,7 @@ func updateValidatingWebhook(c *kubernetes.Clientset) {
 
 func updateMutatingWebhooks(c *kubernetes.Clientset) {
 	mutatingWebhookClient := c.AdmissionregistrationV1().MutatingWebhookConfigurations()
-	for _, name := range []string{OPERATOR_WEBHOOK_NAME, INJECTOR_WEBHOOK_NAME} {
+	for _, name := range []string{constants.OperatorWebHookName, constants.InjectorWebHookName} {
 		mutatingWebhook, err := mutatingWebhookClient.Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			shutdownLog.Error(err, "Error getting webhook")

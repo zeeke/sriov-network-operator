@@ -4,7 +4,7 @@ import (
 	"crypto/tls"
 	"sync"
 
-	"github.com/golang/glog"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Config contains the server (the webhook) cert and key.
@@ -25,7 +25,7 @@ func (keyPair *tlsKeypairReloader) Reload() error {
 	if err != nil {
 		return err
 	}
-	glog.Infof("cetificate reloaded")
+	log.Log.Info("cetificate reloaded")
 	keyPair.certMutex.Lock()
 	defer keyPair.certMutex.Unlock()
 	keyPair.cert = &newCert
@@ -40,7 +40,7 @@ func (keyPair *tlsKeypairReloader) GetCertificateFunc() func(*tls.ClientHelloInf
 	}
 }
 
-func NewTlsKeypairReloader(certPath, keyPath string) (*tlsKeypairReloader, error) {
+func NewTLSKeypairReloader(certPath, keyPath string) (*tlsKeypairReloader, error) {
 	result := &tlsKeypairReloader{
 		certPath: certPath,
 		keyPath:  keyPath,

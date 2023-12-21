@@ -30,7 +30,7 @@ The SR-IOV network operator introduces following new CRDs:
 
 - SriovNetworkNodeState
 
-- SriovNetworkNodeConfigPolicy
+- SriovNetworkNodePolicy
 
 ### SriovNetwork
 
@@ -108,7 +108,7 @@ The custom resource to represent the SR-IOV interface states of each host, which
 - The ‘spec’ of this CR represents the desired configuration which should be applied to the interfaces and SR-IOV device plugin.
 - The ‘status’ contains current states of those PFs (baremetal only), and the states of the VFs. It helps user to discover SR-IOV network hardware on node, or attached VFs in the case of a virtual deployment.
 
-The spec is rendered by sriov-policy-controller, and consumed by sriov-config-daemon. Sriov-config-daemon is responsible for updating the ‘status’ field to reflect the latest status, this information can be used as input to create SriovNetworkNodeConfigPolicy CR.
+The spec is rendered by sriov-policy-controller, and consumed by sriov-config-daemon. Sriov-config-daemon is responsible for updating the ‘status’ field to reflect the latest status, this information can be used as input to create SriovNetworkNodePolicy CR.
 
 An example of SriovNetworkNodeState CR:
 
@@ -121,9 +121,9 @@ metadata:
 spec:
   interfaces:
   - deviceType: vfio-pci
-  mtu: 1500
-  numVfs: 4
-  pciAddress: 0000:86:00.0
+    mtu: 1500
+    numVfs: 4
+    pciAddress: 0000:86:00.0
 status:
   interfaces:
   - deviceID: "1583"
@@ -158,9 +158,9 @@ status:
     vendor: "8086"
 ```
 
-From this example, in status field, the user can find out there are 2 SRIOV capable NICs on node 'work-node-1'; in spec field, user can learn what the expected configure is generated from the combination of SriovNetworkNodeConfigPolicy CRs.  In the virtual deployment case, a single VF will be associated with each device.
+From this example, in status field, the user can find out there are 2 SRIOV capable NICs on node 'work-node-1'; in spec field, user can learn what the expected configure is generated from the combination of SriovNetworkNodePolicy CRs.  In the virtual deployment case, a single VF will be associated with each device.
 
-### SriovNetworkNodeConfigPolicy
+### SriovNetworkNodePolicy
 
 This CRD is the key of SR-IOV network operator. This custom resource should be managed by cluster admin, to instruct the operator to:
 
@@ -168,7 +168,7 @@ This CRD is the key of SR-IOV network operator. This custom resource should be m
 2. Deploy SR-IOV CNI plugin and device plugin on selected node.
 3. Generate the configuration of SR-IOV device plugin.
 
-An example of SriovNetworkNodeConfigPolicy CR:
+An example of SriovNetworkNodePolicy CR:
 
 ```yaml
 apiVersion: sriovnetwork.openshift.io/v1
@@ -198,6 +198,36 @@ In a virtual deployment:
 - The numVfs parameter has no effect as there is always 1 VF
 - The deviceType field depends upon whether the underlying device/driver is [native-bifurcating or non-bifurcating](https://doc.dpdk.org/guides/howto/flow_bifurcation.html) For example, the supported Mellanox devices support native-bifurcating drivers and therefore deviceType should be netdevice (default).  The support Intel devices are non-bifurcating and should be set to vfio-pci.
 
+#### Multiple policies
+
+When multiple SriovNetworkNodeConfigPolicy CRs are present, the `priority` field
+(0 is the highest priority) is used to resolve any conflicts. Conflicts occur
+only when same PF is referenced by multiple policies. The final desired
+configuration is saved in `SriovNetworkNodeState.spec.interfaces`.
+
+Policies processing order is based on priority (lowest first), followed by `name`
+field (starting from `a`). Policies with same **priority** or **non-overlapping
+VF groups** (when #-notation is used in pfName field) are merged, otherwise only
+the highest priority policy is applied. In case of same-priority policies and
+overlapping VF groups, only the last processed policy is applied.
+
+#### Externally Manage virtual functions
+
+When `ExternallyManage` is request on a policy the operator will only skip the virtual function creation.
+The operator will only bind the virtual functions to the requested driver and expose them via the device plugin.
+Another difference when this field is requested in the policy is that when this policy is removed the operator
+will not remove the virtual functions from the policy.
+
+*Note:* This means the user must create the virtual functions before they apply the policy or the webhook will reject
+the policy creation.
+
+It's possible to use something like nmstate kubernetes-nmstate or just a simple systemd file to create
+the virtual functions on boot.
+
+This feature was created to support deployments where the user want to use some of the virtual funtions for the host
+communication like storage network or out of band managment and the virtual functions must exist on boot and not only
+after the operator and config-daemon are running.
+
 ## Components and design
 
 This operator is split into 2 components:
@@ -207,7 +237,7 @@ This operator is split into 2 components:
 
 The controller is responsible for:
 
-1. Read the SriovNetworkNodeConfigPolicy CRs and SriovNetwork CRs as input.
+1. Read the SriovNetworkNodePolicy CRs and SriovNetwork CRs as input.
 2. Render the manifests for SR-IOV CNI plugin and device plugin daemons.
 3. Render the spec of SriovNetworkNodeState CR for each node.
 

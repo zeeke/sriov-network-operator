@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/golang/glog"
-	"k8s.io/api/admission/v1"
+	v1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 )
@@ -14,26 +14,26 @@ import (
 var namespace = os.Getenv("NAMESPACE")
 
 func RetriveSupportedNics() error {
-	if err := sriovnetworkv1.InitNicIdMap(kubeclient, namespace); err != nil {
+	if err := sriovnetworkv1.InitNicIDMapFromConfigMap(kubeclient, namespace); err != nil {
 		return err
 	}
 	return nil
 }
 
 func MutateCustomResource(ar v1.AdmissionReview) *v1.AdmissionResponse {
-	glog.V(2).Info("mutating custom resource")
+	log.Log.V(2).Info("mutating custom resource")
 
 	cr := map[string]interface{}{}
 
 	raw := ar.Request.Object.Raw
 	err := json.Unmarshal(raw, &cr)
 	if err != nil {
-		glog.Error(err)
+		log.Log.Error(err, "failed to unmarshal object")
 		return toV1AdmissionResponse(err)
 	}
 	var reviewResp *v1.AdmissionResponse
 	if reviewResp, err = mutateSriovNetworkNodePolicy(cr); err != nil {
-		glog.Error(err)
+		log.Log.Error(err, "failed to mutate object")
 		return toV1AdmissionResponse(err)
 	}
 
@@ -41,7 +41,7 @@ func MutateCustomResource(ar v1.AdmissionReview) *v1.AdmissionResponse {
 }
 
 func ValidateCustomResource(ar v1.AdmissionReview) *v1.AdmissionResponse {
-	glog.V(2).Info("validating custom resource")
+	log.Log.V(2).Info("validating custom resource")
 	var err error
 	var raw []byte
 
@@ -49,10 +49,8 @@ func ValidateCustomResource(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	reviewResponse := v1.AdmissionResponse{}
 	reviewResponse.Allowed = true
 
-	if ar.Request.Operation == "DELETE" {
+	if ar.Request.Operation == v1.Delete {
 		raw = ar.Request.OldObject.Raw
-	} else {
-		raw = ar.Request.Object.Raw
 	}
 
 	switch ar.Request.Kind.Kind {
@@ -61,7 +59,7 @@ func ValidateCustomResource(ar v1.AdmissionReview) *v1.AdmissionResponse {
 
 		err = json.Unmarshal(raw, &policy)
 		if err != nil {
-			glog.Error(err)
+			log.Log.Error(err, "failed to unmarshal object")
 			return toV1AdmissionResponse(err)
 		}
 
@@ -75,7 +73,7 @@ func ValidateCustomResource(ar v1.AdmissionReview) *v1.AdmissionResponse {
 
 		err = json.Unmarshal(raw, &config)
 		if err != nil {
-			glog.Error(err)
+			log.Log.Error(err, "failed to unmarshal object")
 			return toV1AdmissionResponse(err)
 		}
 

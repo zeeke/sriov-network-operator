@@ -1,11 +1,11 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 
-	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/version"
 	"github.com/spf13/cobra"
+
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/version"
 )
 
 var (
@@ -22,9 +22,6 @@ func init() {
 }
 
 func runVersionCmd(cmd *cobra.Command, args []string) {
-	flag.Set("logtostderr", "true")
-	flag.Parse()
-
 	program := "SriovNetworkConfigDaemon"
 	version := "v" + version.Version.String()
 

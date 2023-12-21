@@ -1,9 +1,13 @@
-package main
+package intel
 
 import (
-	"github.com/golang/glog"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
+	plugin "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/plugins"
 )
+
+var PluginName = "intel_plugin"
 
 type IntelPlugin struct {
 	PluginName  string
@@ -12,14 +16,11 @@ type IntelPlugin struct {
 	LastState   *sriovnetworkv1.SriovNetworkNodeState
 }
 
-var Plugin IntelPlugin
-
-// Initialize our plugin and set up initial values
-func init() {
-	Plugin = IntelPlugin{
-		PluginName:  "intel_plugin",
+func NewIntelPlugin() (plugin.VendorPlugin, error) {
+	return &IntelPlugin{
+		PluginName:  PluginName,
 		SpecVersion: "1.0",
-	}
+	}, nil
 }
 
 // Name returns the name of the plugin
@@ -32,20 +33,14 @@ func (p *IntelPlugin) Spec() string {
 	return p.SpecVersion
 }
 
-// OnNodeStateAdd Invoked when SriovNetworkNodeState CR is created, return if need dain and/or reboot node
-func (p *IntelPlugin) OnNodeStateAdd(state *sriovnetworkv1.SriovNetworkNodeState) (needDrain bool, needReboot bool, err error) {
-	glog.Info("intel-plugin OnNodeStateAdd()")
-	return false, false, nil
-}
-
-// OnNodeStateChange Invoked when SriovNetworkNodeState CR is updated, return if need dain and/or reboot node
-func (p *IntelPlugin) OnNodeStateChange(old, new *sriovnetworkv1.SriovNetworkNodeState) (needDrain bool, needReboot bool, err error) {
-	glog.Info("intel-plugin OnNodeStateChange()")
+// OnNodeStateChange Invoked when SriovNetworkNodeState CR is created or updated, return if need dain and/or reboot node
+func (p *IntelPlugin) OnNodeStateChange(new *sriovnetworkv1.SriovNetworkNodeState) (needDrain bool, needReboot bool, err error) {
+	log.Log.Info("intel-plugin OnNodeStateChange()")
 	return false, false, nil
 }
 
 // Apply config change
 func (p *IntelPlugin) Apply() error {
-	glog.Info("intel-plugin Apply()")
+	log.Log.Info("intel-plugin Apply()")
 	return nil
 }

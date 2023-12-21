@@ -8,17 +8,23 @@ import (
 	"time"
 
 	netattdefv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	dynclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
-	util "github.com/k8snetworkplumbingwg/sriov-network-operator/test/util"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/test/util"
+)
+
+const (
+	on         = "on"
+	emptyCurls = "{}"
 )
 
 var _ = Describe("SriovNetwork Controller", func() {
@@ -29,6 +35,8 @@ var _ = Describe("SriovNetwork Controller", func() {
 				ResourceName: "resource_1",
 				IPAM:         `{"type":"host-local","subnet":"10.56.217.0/24","rangeStart":"10.56.217.171","rangeEnd":"10.56.217.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.56.217.1"}`,
 				Vlan:         100,
+				VlanQoS:      5,
+				VlanProto:    "802.1ad",
 			},
 			"test-1": {
 				ResourceName:     "resource_1",
@@ -38,23 +46,29 @@ var _ = Describe("SriovNetwork Controller", func() {
 			"test-2": {
 				ResourceName: "resource_1",
 				IPAM:         `{"type":"host-local","subnet":"10.56.217.0/24","rangeStart":"10.56.217.171","rangeEnd":"10.56.217.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.56.217.1"}`,
-				SpoofChk:     "on",
+				SpoofChk:     on,
 			},
 			"test-3": {
 				ResourceName: "resource_1",
 				IPAM:         `{"type":"host-local","subnet":"10.56.217.0/24","rangeStart":"10.56.217.171","rangeEnd":"10.56.217.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.56.217.1"}`,
-				Trust:        "on",
+				Trust:        on,
 			},
 			"test-4": {
 				ResourceName: "resource_1",
 				IPAM:         `{"type":"host-local","subnet":"10.56.217.0/24","rangeStart":"10.56.217.171","rangeEnd":"10.56.217.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.56.217.1"}`,
+			},
+			"test-5": {
+				ResourceName: "resource_1",
+				IPAM:         `{"type":"host-local","subnet":"10.56.217.0/24","rangeStart":"10.56.217.171","rangeEnd":"10.56.217.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.56.217.1"}`,
+				LogLevel:     "debug",
+				LogFile:      "/tmp/tmpfile",
 			},
 		}
 		sriovnets := util.GenerateSriovNetworkCRs(testNamespace, specs)
 		DescribeTable("should be possible to create/delete net-att-def",
 			func(cr sriovnetworkv1.SriovNetwork) {
 				var err error
-				expect := util.GenerateExpectedNetConfig(&cr)
+				expect := generateExpectedNetConfig(&cr)
 
 				By("Create the SriovNetwork Custom Resource")
 				// get global framework variables
@@ -83,10 +97,11 @@ var _ = Describe("SriovNetwork Controller", func() {
 				err = util.WaitForNamespacedObjectDeleted(netAttDef, k8sClient, ns, cr.GetName(), util.RetryInterval, util.Timeout)
 				Expect(err).NotTo(HaveOccurred())
 			},
-			Entry("with vlan flag", sriovnets["test-0"]),
+			Entry("with vlan, vlanQoS and vlanProto flag", sriovnets["test-0"]),
 			Entry("with networkNamespace flag", sriovnets["test-1"]),
 			Entry("with SpoofChk flag on", sriovnets["test-2"]),
 			Entry("with Trust flag on", sriovnets["test-3"]),
+			Entry("with LogLevel and LogFile", sriovnets["test-5"]),
 		)
 
 		newSpecs := map[string]sriovnetworkv1.SriovNetworkSpec{
@@ -94,6 +109,7 @@ var _ = Describe("SriovNetwork Controller", func() {
 				ResourceName: "resource_1",
 				IPAM:         `{"type":"dhcp"}`,
 				Vlan:         200,
+				VlanProto:    "802.1q",
 			},
 			"new-1": {
 				ResourceName: "resource_1",
@@ -102,12 +118,12 @@ var _ = Describe("SriovNetwork Controller", func() {
 			"new-2": {
 				ResourceName: "resource_1",
 				IPAM:         `{"type":"host-local","subnet":"10.56.217.0/24","rangeStart":"10.56.217.171","rangeEnd":"10.56.217.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.56.217.1"}`,
-				SpoofChk:     "on",
+				SpoofChk:     on,
 			},
 			"new-3": {
 				ResourceName: "resource_1",
 				IPAM:         `{"type":"host-local","subnet":"10.56.217.0/24","rangeStart":"10.56.217.171","rangeEnd":"10.56.217.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.56.217.1"}`,
-				Trust:        "on",
+				Trust:        on,
 			},
 		}
 		newsriovnets := util.GenerateSriovNetworkCRs(testNamespace, newSpecs)
@@ -122,7 +138,7 @@ var _ = Describe("SriovNetwork Controller", func() {
 				}()
 				Expect(err).NotTo(HaveOccurred())
 				found := &sriovnetworkv1.SriovNetwork{}
-				expect := util.GenerateExpectedNetConfig(&new)
+				expect := generateExpectedNetConfig(&new)
 
 				retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 					// Retrieve the latest version of SriovNetwork before attempting update
@@ -157,7 +173,7 @@ var _ = Describe("SriovNetwork Controller", func() {
 				Expect(anno["k8s.v1.cni.cncf.io/resourceName"]).To(Equal("openshift.io/" + new.Spec.ResourceName))
 				Expect(strings.TrimSpace(netAttDef.Spec.Config)).To(Equal(expect))
 			},
-			Entry("with vlan flag and ipam updated", sriovnets["test-4"], newsriovnets["new-0"]),
+			Entry("with vlan and proto flag and ipam updated", sriovnets["test-4"], newsriovnets["new-0"]),
 			Entry("with networkNamespace flag", sriovnets["test-4"], newsriovnets["new-1"]),
 			Entry("with SpoofChk flag on", sriovnets["test-4"], newsriovnets["new-2"]),
 			Entry("with Trust flag on", sriovnets["test-4"], newsriovnets["new-3"]),
@@ -182,7 +198,7 @@ var _ = Describe("SriovNetwork Controller", func() {
 					},
 				}
 				var err error
-				expect := util.GenerateExpectedNetConfig(&cr)
+				expect := generateExpectedNetConfig(&cr)
 
 				err = k8sClient.Create(goctx.TODO(), &cr)
 				Expect(err).NotTo(HaveOccurred())
@@ -210,5 +226,99 @@ var _ = Describe("SriovNetwork Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			})
 		})
+
+		Context("When the target NetworkNamespace doesn't exists", func() {
+			It("should create the NetAttachDef when the namespace is created", func() {
+				cr := sriovnetworkv1.SriovNetwork{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-missing-namespace",
+						Namespace: testNamespace,
+					},
+					Spec: sriovnetworkv1.SriovNetworkSpec{
+						NetworkNamespace: "ns-xxx",
+						ResourceName:     "resource_missing_namespace",
+						IPAM:             `{"type":"dhcp"}`,
+						Vlan:             200,
+					},
+				}
+				var err error
+				expect := generateExpectedNetConfig(&cr)
+
+				err = k8sClient.Create(goctx.TODO(), &cr)
+				Expect(err).NotTo(HaveOccurred())
+
+				DeferCleanup(func() {
+					err = k8sClient.Delete(goctx.TODO(), &cr)
+					Expect(err).NotTo(HaveOccurred())
+				})
+
+				// Sleep 3 seconds to be sure the Reconcile loop has been invoked. This can be improved by exposing some information (e.g. the error)
+				// in the SriovNetwork.Status field.
+				time.Sleep(3 * time.Second)
+
+				netAttDef := &netattdefv1.NetworkAttachmentDefinition{}
+				err = k8sClient.Get(ctx, types.NamespacedName{Name: cr.GetName(), Namespace: "ns-xxx"}, netAttDef)
+				Expect(err).To(HaveOccurred())
+
+				err = k8sClient.Create(goctx.TODO(), &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "ns-xxx"},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				err = util.WaitForNamespacedObject(netAttDef, k8sClient, "ns-xxx", cr.GetName(), util.RetryInterval, util.Timeout)
+				Expect(err).NotTo(HaveOccurred())
+
+				anno := netAttDef.GetAnnotations()
+				Expect(anno["k8s.v1.cni.cncf.io/resourceName"]).To(Equal("openshift.io/" + cr.Spec.ResourceName))
+				Expect(strings.TrimSpace(netAttDef.Spec.Config)).To(Equal(expect))
+			})
+		})
+
 	})
 })
+
+func generateExpectedNetConfig(cr *sriovnetworkv1.SriovNetwork) string {
+	spoofchk := ""
+	trust := ""
+	vlanProto := ""
+	logLevel := `"logLevel":"info",`
+	logFile := ""
+	ipam := emptyCurls
+
+	if cr.Spec.Trust == sriovnetworkv1.SriovCniStateOn {
+		trust = `"trust":"on",`
+	} else if cr.Spec.Trust == sriovnetworkv1.SriovCniStateOff {
+		trust = `"trust":"off",`
+	}
+
+	if cr.Spec.SpoofChk == sriovnetworkv1.SriovCniStateOn {
+		spoofchk = `"spoofchk":"on",`
+	} else if cr.Spec.SpoofChk == sriovnetworkv1.SriovCniStateOff {
+		spoofchk = `"spoofchk":"off",`
+	}
+
+	state := getLinkState(cr.Spec.LinkState)
+
+	if cr.Spec.IPAM != "" {
+		ipam = cr.Spec.IPAM
+	}
+	vlanQoS := cr.Spec.VlanQoS
+
+	if cr.Spec.VlanProto != "" {
+		vlanProto = fmt.Sprintf(`"vlanProto": "%s",`, cr.Spec.VlanProto)
+	}
+	if cr.Spec.LogLevel != "" {
+		logLevel = fmt.Sprintf(`"logLevel":"%s",`, cr.Spec.LogLevel)
+	}
+	if cr.Spec.LogFile != "" {
+		logFile = fmt.Sprintf(`"logFile":"%s",`, cr.Spec.LogFile)
+	}
+
+	configStr, err := formatJSON(fmt.Sprintf(
+		`{ "cniVersion":"0.3.1", "name":"%s","type":"sriov","vlan":%d,%s%s"vlanQoS":%d,%s%s%s%s"ipam":%s }`,
+		cr.GetName(), cr.Spec.Vlan, spoofchk, trust, vlanQoS, vlanProto, state, logLevel, logFile, ipam))
+	if err != nil {
+		panic(err)
+	}
+	return configStr
+}

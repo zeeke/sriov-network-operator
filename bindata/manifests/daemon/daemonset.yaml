@@ -16,55 +16,90 @@ spec:
       maxUnavailable: 33%
   template:
     metadata:
-      annotations:
-        target.workload.openshift.io/management: '{"effect": "PreferredDuringScheduling"}'
       labels:
         app: sriov-network-config-daemon
         component: network
         type: infra
         openshift.io/component: network
+      annotations:
+        kubectl.kubernetes.io/default-container: sriov-network-config-daemon
+        target.workload.openshift.io/management: '{"effect": "PreferredDuringScheduling"}'
     spec:
       hostNetwork: true
       hostPID: true
       nodeSelector:
-        beta.kubernetes.io/os: linux
-        node-role.kubernetes.io/worker:
+        kubernetes.io/os: linux
+        node-role.kubernetes.io/worker: ""
       tolerations:
       - operator: Exists
       serviceAccountName: sriov-network-config-daemon
       priorityClassName: "system-node-critical"
+      {{- if .ImagePullSecrets }}
+      imagePullSecrets:
+      {{- range .ImagePullSecrets }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }}
+      initContainers:
+        - name: sriov-cni
+          image: {{.SRIOVCNIImage}}
+          command:
+            - /bin/sh
+            - -c
+            - cp /usr/bin/sriov /host/opt/cni/bin/
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 10Mi
+          volumeMounts:
+            - name: cnibin
+              mountPath: /host/opt/cni/bin
+        - name: sriov-infiniband-cni
+          image: {{.SRIOVInfiniBandCNIImage}}
+          command:
+            - /bin/sh
+            - -c
+            - cp /usr/bin/ib-sriov /host/opt/cni/bin/
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 10Mi
+          volumeMounts:
+            - name: cnibin
+              mountPath: /host/opt/cni/bin
+      {{- if .UsedSystemdMode}}
+        - name: sriov-service-copy
+          image: {{.Image}}
+          command:
+            - /bin/bash
+            - -c
+            - mkdir -p /host/var/lib/sriov/ && cp /usr/bin/sriov-network-config-daemon /host/var/lib/sriov/sriov-network-config-daemon && chcon -t bin_t /host/var/lib/sriov/sriov-network-config-daemon | true # Allow systemd to run the file, use pipe true to not failed if the system doesn't have selinux or apparmor enabled
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 10Mi
+          volumeMounts:
+            - name: host
+              mountPath: /host
+      {{- end }}
       containers:
-      - name: sriov-cni
-        image: {{.SRIOVCNIImage}}
-        securityContext:
-          privileged: true
-        resources:
-          requests:
-            cpu: 10m
-            memory: 10Mi
-        volumeMounts:
-        - name: cnibin
-          mountPath: /host/opt/cni/bin
-      - name: sriov-infiniband-cni
-        image: {{.SRIOVInfiniBandCNIImage}}
-        securityContext:
-          privileged: true
-        resources:
-          requests:
-            cpu: 10m
-            memory: 10Mi
-        volumeMounts:
-        - name: cnibin
-          mountPath: /host/opt/cni/bin
       - name: sriov-network-config-daemon
         image: {{.Image}}
         command:
           - sriov-network-config-daemon
-        imagePullPolicy: IfNotPresent
         securityContext:
           privileged: true
         args:
           - "start"
+        {{- if .UsedSystemdMode}}
+          - --use-systemd-service
+        {{- end }}
         env:
           - name: NODE_NAME
             valueFrom:
@@ -76,13 +111,15 @@ spec:
                 fieldPath: metadata.namespace
           - name: CLUSTER_TYPE
             value: "{{.ClusterType}}"
+          - name: DEV_MODE
+            value: "{{.DevMode}}"
         resources:
           requests:
             cpu: 100m
             memory: 100Mi
         volumeMounts:
-        - name: host
-          mountPath: /host
+          - name: host
+            mountPath: /host
         lifecycle:
           preStop:
             exec:

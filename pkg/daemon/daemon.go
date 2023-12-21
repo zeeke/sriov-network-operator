@@ -4,27 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"reflect"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/golang/glog"
 	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 	daemonconsts "github.com/openshift/machine-config-operator/pkg/daemon/constants"
-	mcclientset "github.com/openshift/machine-config-operator/pkg/generated/clientset/versioned"
 	mcfginformers "github.com/openshift/machine-config-operator/pkg/generated/informers/externalversions"
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -40,10 +35,16 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/kubectl/pkg/drain"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 	snclientset "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/client/clientset/versioned"
 	sninformer "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/client/informers/externalversions"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/host"
+	snolog "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/log"
+	plugin "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/plugins"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/service"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/systemd"
 	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/utils"
 )
 
@@ -63,20 +64,25 @@ type Message struct {
 
 type Daemon struct {
 	// name is the node name.
-	name      string
-	namespace string
+	name string
 
 	platform utils.PlatformType
 
+	useSystemdService bool
+
+	devMode bool
+
 	client snclientset.Interface
 	// kubeClient allows interaction with Kubernetes, including the node we are running on.
-	kubeClient *kubernetes.Clientset
+	kubeClient kubernetes.Interface
 
-	mcClient *mcclientset.Clientset
+	openshiftContext *utils.OpenshiftContext
 
 	nodeState *sriovnetworkv1.SriovNetworkNodeState
 
-	LoadedPlugins map[string]VendorPlugin
+	enabledPlugins map[string]plugin.VendorPlugin
+
+	serviceManager service.ServiceManager
 
 	// channel used by callbacks to signal Run() of an error
 	exitCh chan<- error
@@ -87,8 +93,6 @@ type Daemon struct {
 	syncCh <-chan struct{}
 
 	refreshCh chan<- Message
-
-	dpReboot bool
 
 	mu *sync.Mutex
 
@@ -105,27 +109,30 @@ type Daemon struct {
 	workqueue workqueue.RateLimitingInterface
 
 	mcpName string
-}
 
-type workItem struct {
-	old, new *sriovnetworkv1.SriovNetworkNodeState
+	storeManager utils.StoreManagerInterface
+
+	hostManager host.HostManagerInterface
+
+	eventRecorder *EventRecorder
 }
 
 const (
-	rdmaScriptsPath = "/bindata/scripts/enable-rdma.sh"
-	udevScriptsPath = "/bindata/scripts/load-udev.sh"
-	annoKey         = "sriovnetwork.openshift.io/state"
-	annoIdle        = "Idle"
-	annoDraining    = "Draining"
-	annoMcpPaused   = "Draining_MCP_Paused"
+	udevScriptsPath      = "/bindata/scripts/load-udev.sh"
+	annoKey              = "sriovnetwork.openshift.io/state"
+	annoIdle             = "Idle"
+	annoDraining         = "Draining"
+	annoMcpPaused        = "Draining_MCP_Paused"
+	syncStatusSucceeded  = "Succeeded"
+	syncStatusFailed     = "Failed"
+	syncStatusInProgress = "InProgress"
 )
 
 var namespace = os.Getenv("NAMESPACE")
-var pluginsPath = os.Getenv("PLUGINSPATH")
 
-// writer implements io.Writer interface as a pass-through for glog.
+// writer implements io.Writer interface as a pass-through for log.Log.
 type writer struct {
-	logFunc func(args ...interface{})
+	logFunc func(msg string, keysAndValues ...interface{})
 }
 
 // Write passes string(p) into writer's logFunc and always returns len(p)
@@ -137,25 +144,31 @@ func (w writer) Write(p []byte) (n int, err error) {
 func New(
 	nodeName string,
 	client snclientset.Interface,
-	kubeClient *kubernetes.Clientset,
-	mcClient *mcclientset.Clientset,
+	kubeClient kubernetes.Interface,
+	openshiftContext *utils.OpenshiftContext,
 	exitCh chan<- error,
 	stopCh <-chan struct{},
 	syncCh <-chan struct{},
 	refreshCh chan<- Message,
 	platformType utils.PlatformType,
+	useSystemdService bool,
+	er *EventRecorder,
+	devMode bool,
 ) *Daemon {
 	return &Daemon{
-		name:       nodeName,
-		platform:   platformType,
-		client:     client,
-		kubeClient: kubeClient,
-		mcClient:   mcClient,
-		exitCh:     exitCh,
-		stopCh:     stopCh,
-		syncCh:     syncCh,
-		refreshCh:  refreshCh,
-		nodeState:  &sriovnetworkv1.SriovNetworkNodeState{},
+		name:              nodeName,
+		platform:          platformType,
+		useSystemdService: useSystemdService,
+		devMode:           devMode,
+		client:            client,
+		kubeClient:        kubeClient,
+		openshiftContext:  openshiftContext,
+		serviceManager:    service.NewServiceManager("/host"),
+		exitCh:            exitCh,
+		stopCh:            stopCh,
+		syncCh:            syncCh,
+		refreshCh:         refreshCh,
+		nodeState:         &sriovnetworkv1.SriovNetworkNodeState{},
 		drainer: &drain.Helper{
 			Client:              kubeClient,
 			Force:               true,
@@ -168,77 +181,59 @@ func New(
 				if usingEviction {
 					verbStr = "Evicted"
 				}
-				glog.Info(fmt.Sprintf("%s pod from Node %s/%s", verbStr, pod.Namespace, pod.Name))
+				log.Log.Info(fmt.Sprintf("%s pod from Node %s/%s", verbStr, pod.Namespace, pod.Name))
 			},
-			Out:    writer{glog.Info},
-			ErrOut: writer{glog.Error},
+			Out:    writer{log.Log.Info},
+			ErrOut: writer{func(msg string, kv ...interface{}) { log.Log.Error(nil, msg, kv...) }},
+			Ctx:    context.Background(),
 		},
 		workqueue: workqueue.NewNamedRateLimitingQueue(workqueue.NewMaxOfRateLimiter(
 			&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(updateDelay), 1)},
 			workqueue.NewItemExponentialFailureRateLimiter(1*time.Second, maxUpdateBackoff)), "SriovNetworkNodeState"),
+		eventRecorder: er,
 	}
-}
-
-func (dn *Daemon) annotateUnsupportedNicIdConfigMap(cm *v1.ConfigMap, nodeName string) (*v1.ConfigMap, error) {
-	jsonData, err := json.Marshal(cm.Data)
-	if err != nil {
-		return nil, err
-	}
-	cmData := string(jsonData)
-
-	annotationKey := "openshift.io/" + nodeName
-	annotationData, ok := cm.ObjectMeta.Annotations[annotationKey]
-	if ok && cmData == annotationData {
-		return cm, nil
-	}
-
-	if cm.ObjectMeta.Annotations == nil {
-		cm.ObjectMeta.Annotations = make(map[string]string)
-	}
-	cm.ObjectMeta.Annotations[annotationKey] = cmData
-	return dn.kubeClient.CoreV1().ConfigMaps(namespace).Update(context.Background(), cm, metav1.UpdateOptions{})
-}
-
-func (dn *Daemon) tryCreateUdevRuleWrapper() error {
-	ns, nodeStateErr := dn.client.SriovnetworkV1().SriovNetworkNodeStates(namespace).Get(
-		context.Background(),
-		dn.name,
-		metav1.GetOptions{},
-	)
-	if nodeStateErr != nil {
-		glog.Warningf("Could not fetch node state %s: %v, skip updating switchdev udev rules", dn.name, nodeStateErr)
-	} else {
-		err := tryCreateSwitchdevUdevRule(ns)
-		if err != nil {
-			glog.Warningf("Failed to create switchdev udev rules: %v", err)
-		}
-	}
-
-	// update udev rule and if update succeeds
-	err := tryCreateNMUdevRule()
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // Run the config daemon
 func (dn *Daemon) Run(stopCh <-chan struct{}, exitCh <-chan error) error {
-	glog.V(0).Info("Run(): start daemon")
+	log.Log.V(0).Info("Run()", "node", dn.name)
+
+	if utils.ClusterType == utils.ClusterTypeOpenshift {
+		log.Log.V(0).Info("Run(): start daemon.", "openshiftFlavor", dn.openshiftContext.OpenshiftFlavor)
+	} else {
+		log.Log.V(0).Info("Run(): start daemon.")
+	}
+
+	if dn.useSystemdService {
+		log.Log.V(0).Info("Run(): daemon running in systemd mode")
+	}
 	// Only watch own SriovNetworkNodeState CR
 	defer utilruntime.HandleCrash()
 	defer dn.workqueue.ShutDown()
 
-	tryEnableRdma()
-	tryEnableTun()
-
-	if err := sriovnetworkv1.InitNicIdMap(dn.kubeClient, namespace); err != nil {
-		return err
+	hostManager := host.NewHostManager(dn.useSystemdService)
+	dn.hostManager = hostManager
+	if !dn.useSystemdService {
+		dn.hostManager.TryEnableRdma()
+		dn.hostManager.TryEnableTun()
+		dn.hostManager.TryEnableVhostNet()
+		err := systemd.CleanSriovFilesFromHost(utils.ClusterType == utils.ClusterTypeOpenshift)
+		if err != nil {
+			log.Log.Error(err, "failed to remove all the systemd sriov files")
+		}
 	}
 
-	if err := dn.tryCreateUdevRuleWrapper(); err != nil {
+	storeManager, err := utils.NewStoreManager(false)
+	if err != nil {
 		return err
+	}
+	dn.storeManager = storeManager
+
+	if err := dn.prepareNMUdevRule(); err != nil {
+		log.Log.Error(err, "failed to prepare udev files to disable network manager on requested VFs")
+	}
+	if err := dn.tryCreateSwitchdevUdevRule(); err != nil {
+		log.Log.Error(err, "failed to create udev files for switchdev")
 	}
 
 	var timeout int64 = 5
@@ -292,27 +287,29 @@ func (dn *Daemon) Run(stopCh <-chan struct{}, exitCh <-chan error) error {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
-	glog.Info("Starting workers")
-	// Launch one workers to process
+	log.Log.Info("Starting workers")
+	// Launch one worker to process
 	go wait.Until(dn.runWorker, time.Second, stopCh)
-	glog.Info("Started workers")
+	log.Log.Info("Started workers")
 
 	for {
 		select {
 		case <-stopCh:
-			glog.V(0).Info("Run(): stop daemon")
+			log.Log.V(0).Info("Run(): stop daemon")
 			return nil
-		case err := <-exitCh:
-			glog.Warningf("Got an error: %v", err)
-			dn.refreshCh <- Message{
-				syncStatus:    "Failed",
-				lastSyncError: err.Error(),
+		case err, more := <-exitCh:
+			log.Log.Error(err, "got an error")
+			if more {
+				dn.refreshCh <- Message{
+					syncStatus:    syncStatusFailed,
+					lastSyncError: err.Error(),
+				}
 			}
 			return err
 		case <-time.After(30 * time.Second):
-			glog.V(2).Info("Run(): period refresh")
-			if err := dn.tryCreateUdevRuleWrapper(); err != nil {
-				glog.V(2).Info("Could not create udev rule: ", err)
+			log.Log.V(2).Info("Run(): period refresh")
+			if err := dn.tryCreateSwitchdevUdevRule(); err != nil {
+				log.Log.V(2).Error(err, "Could not create udev rule")
 			}
 		}
 	}
@@ -335,12 +332,13 @@ func (dn *Daemon) enqueueNodeState(obj interface{}) {
 }
 
 func (dn *Daemon) processNextWorkItem() bool {
-	glog.V(2).Infof("worker queue size: %d", dn.workqueue.Len())
+	log.Log.V(2).Info("processNextWorkItem", "worker-queue-size", dn.workqueue.Len())
 	obj, shutdown := dn.workqueue.Get()
-	glog.V(2).Infof("get item: %d", obj.(int64))
 	if shutdown {
 		return false
 	}
+
+	log.Log.V(2).Info("get item from queue", "item", obj.(int64))
 
 	// We wrap this block in a func so we can defer c.workqueue.Done.
 	err := func(obj interface{}) error {
@@ -356,13 +354,12 @@ func (dn *Daemon) processNextWorkItem() bool {
 			utilruntime.HandleError(fmt.Errorf("expected workItem in workqueue but got %#v", obj))
 			return nil
 		}
-		var err error
 
-		err = dn.nodeStateSyncHandler(key)
+		err := dn.nodeStateSyncHandler()
 		if err != nil {
 			// Ereport error message, and put the item back to work queue for retry.
 			dn.refreshCh <- Message{
-				syncStatus:    "Failed",
+				syncStatus:    syncStatusFailed,
 				lastSyncError: err.Error(),
 			}
 			<-dn.syncCh
@@ -372,7 +369,7 @@ func (dn *Daemon) processNextWorkItem() bool {
 		// Finally, if no error occurs we Forget this item so it does not
 		// get queued again until another change happens.
 		dn.workqueue.Forget(obj)
-		glog.Infof("Successfully synced")
+		log.Log.Info("Successfully synced")
 		return nil
 	}(obj)
 
@@ -390,20 +387,36 @@ func (dn *Daemon) nodeAddHandler(obj interface{}) {
 func (dn *Daemon) nodeUpdateHandler(old, new interface{}) {
 	node, err := dn.nodeLister.Get(dn.name)
 	if errors.IsNotFound(err) {
-		glog.V(2).Infof("nodeUpdateHandler(): node %v has been deleted", dn.name)
+		log.Log.V(2).Info("nodeUpdateHandler(): node has been deleted", "name", dn.name)
 		return
 	}
 	dn.node = node.DeepCopy()
+
 	nodes, err := dn.nodeLister.List(labels.Everything())
 	if err != nil {
+		log.Log.Error(err, "nodeUpdateHandler(): failed to list nodes")
 		return
 	}
-	for _, node := range nodes {
-		if node.GetName() != dn.name && (node.Annotations[annoKey] == annoDraining || node.Annotations[annoKey] == annoMcpPaused) {
+
+	// Checking if other nodes are draining
+	for _, otherNode := range nodes {
+		if otherNode.GetName() == dn.name {
+			continue
+		}
+
+		drainingAnnotationValue := otherNode.Annotations[annoKey]
+		if drainingAnnotationValue == annoDraining || drainingAnnotationValue == annoMcpPaused {
+			log.Log.V(2).Info("nodeUpdateHandler(): node is not drainable, another node is draining",
+				"other-node", otherNode.Name, "annotation", annoKey+"="+drainingAnnotationValue)
 			dn.drainable = false
 			return
 		}
 	}
+
+	if !dn.drainable {
+		log.Log.V(2).Info("nodeUpdateHandler(): node is now drainable")
+	}
+
 	dn.drainable = true
 }
 
@@ -413,158 +426,321 @@ func (dn *Daemon) operatorConfigAddHandler(obj interface{}) {
 
 func (dn *Daemon) operatorConfigChangeHandler(old, new interface{}) {
 	newCfg := new.(*sriovnetworkv1.SriovOperatorConfig)
-	var level = glog.Level(newCfg.Spec.LogLevel)
-	if level != flag.Lookup("v").Value.(flag.Getter).Get() {
-		glog.Infof("Set log verbose level to: %d", level)
-		flag.Set("v", level.String())
-	}
+	dn.handleLogLevelChange(newCfg.Spec.LogLevel)
+
 	newDisableDrain := newCfg.Spec.DisableDrain
 	if dn.disableDrain != newDisableDrain {
 		dn.disableDrain = newDisableDrain
-		glog.Infof("Set Disable Drain to: %t", dn.disableDrain)
+		log.Log.Info("Set Disable Drain", "value", dn.disableDrain)
 	}
 }
 
-func (dn *Daemon) nodeStateSyncHandler(generation int64) error {
+// handleLogLevelChange handles log level change
+func (dn *Daemon) handleLogLevelChange(logLevel int) {
+	newLevel := int8(logLevel * -1)
+	currLevel := int8(snolog.Options.Level.(zap.AtomicLevel).Level())
+	if newLevel != currLevel {
+		log.Log.Info("Set log verbose level", "new-level", newLevel, "current-level", currLevel)
+		snolog.SetLogLevel(newLevel)
+	}
+}
+
+func (dn *Daemon) nodeStateSyncHandler() error {
 	var err error
-	glog.V(0).Infof("nodeStateSyncHandler(): new generation is %d", generation)
 	// Get the latest NodeState
 	var latestState *sriovnetworkv1.SriovNetworkNodeState
+	var sriovResult = &systemd.SriovResult{SyncStatus: syncStatusSucceeded, LastSyncError: ""}
 	latestState, err = dn.client.SriovnetworkV1().SriovNetworkNodeStates(namespace).Get(context.Background(), dn.name, metav1.GetOptions{})
 	if err != nil {
-		glog.Warningf("nodeStateSyncHandler(): Failed to fetch node state %s: %v", dn.name, err)
+		log.Log.Error(err, "nodeStateSyncHandler(): Failed to fetch node state", "name", dn.name)
 		return err
 	}
 	latest := latestState.GetGeneration()
+	log.Log.V(0).Info("nodeStateSyncHandler(): new generation", "generation", latest)
+
+	if utils.ClusterType == utils.ClusterTypeOpenshift && !dn.openshiftContext.IsHypershift() {
+		if err = dn.getNodeMachinePool(); err != nil {
+			return err
+		}
+	}
+
 	if dn.nodeState.GetGeneration() == latest {
-		glog.V(0).Infof("nodeStateSyncHandler(): Interface not changed")
+		if dn.useSystemdService {
+			serviceEnabled, err := dn.serviceManager.IsServiceEnabled(systemd.SriovServicePath)
+			if err != nil {
+				log.Log.Error(err, "nodeStateSyncHandler(): failed to check if sriov-config service exist on host")
+				return err
+			}
+
+			// if the service doesn't exist we should continue to let the k8s plugin to create the service files
+			// this is only for k8s base environments, for openshift the sriov-operator creates a machine config to will apply
+			// the system service and reboot the node the config-daemon doesn't need to do anything.
+			if !serviceEnabled {
+				sriovResult = &systemd.SriovResult{SyncStatus: syncStatusFailed,
+					LastSyncError: "sriov-config systemd service is not available on node"}
+			} else {
+				sriovResult, err = systemd.ReadSriovResult()
+				if err != nil {
+					log.Log.Error(err, "nodeStateSyncHandler(): failed to load sriov result file from host")
+					return err
+				}
+			}
+			if sriovResult.LastSyncError != "" || sriovResult.SyncStatus == syncStatusFailed {
+				log.Log.Info("nodeStateSyncHandler(): sync failed systemd service error", "last-sync-error", sriovResult.LastSyncError)
+
+				// add the error but don't requeue
+				dn.refreshCh <- Message{
+					syncStatus:    syncStatusFailed,
+					lastSyncError: sriovResult.LastSyncError,
+				}
+				<-dn.syncCh
+				return nil
+			}
+		}
+		log.Log.V(0).Info("nodeStateSyncHandler(): Interface not changed")
 		if latestState.Status.LastSyncError != "" ||
-			latestState.Status.SyncStatus != "Succeeded" {
+			latestState.Status.SyncStatus != syncStatusSucceeded {
 			dn.refreshCh <- Message{
-				syncStatus:    "Succeeded",
+				syncStatus:    syncStatusSucceeded,
 				lastSyncError: "",
 			}
+			// wait for writer to refresh the status
+			<-dn.syncCh
 		}
 
 		return nil
 	}
 
-	dn.refreshCh <- Message{
-		syncStatus:    "InProgress",
-		lastSyncError: "",
+	if latestState.GetGeneration() == 1 && len(latestState.Spec.Interfaces) == 0 {
+		err = dn.storeManager.ClearPCIAddressFolder()
+		if err != nil {
+			log.Log.Error(err, "failed to clear the PCI address configuration")
+			return err
+		}
+
+		log.Log.V(0).Info(
+			"nodeStateSyncHandler(): interface policy spec not yet set by controller for sriovNetworkNodeState",
+			"name", latestState.Name)
+		if latestState.Status.SyncStatus != "Succeeded" {
+			dn.refreshCh <- Message{
+				syncStatus:    "Succeeded",
+				lastSyncError: "",
+			}
+			// wait for writer to refresh status
+			<-dn.syncCh
+		}
+		return nil
 	}
 
-	// load plugins if has not loaded
-	if len(dn.LoadedPlugins) == 0 {
-		err = dn.loadVendorPlugins(latestState)
+	dn.refreshCh <- Message{
+		syncStatus:    syncStatusInProgress,
+		lastSyncError: "",
+	}
+	// wait for writer to refresh status then pull again the latest node state
+	<-dn.syncCh
+
+	// we need to load the latest status to our object
+	// if we don't do it we can have a race here where the user remove the virtual functions but the operator didn't
+	// trigger the refresh
+	updatedState, err := dn.client.SriovnetworkV1().SriovNetworkNodeStates(namespace).Get(context.Background(), dn.name, metav1.GetOptions{})
+	if err != nil {
+		log.Log.Error(err, "nodeStateSyncHandler(): Failed to fetch node state", "name", dn.name)
+		return err
+	}
+	latestState.Status = updatedState.Status
+
+	// load plugins if it has not loaded
+	if len(dn.enabledPlugins) == 0 {
+		dn.enabledPlugins, err = enablePlugins(dn.platform, dn.useSystemdService, latestState, dn.hostManager, dn.storeManager)
 		if err != nil {
-			glog.Errorf("nodeStateSyncHandler(): failed to load vendor plugin: %v", err)
+			log.Log.Error(err, "nodeStateSyncHandler(): failed to enable vendor plugins")
 			return err
 		}
 	}
 
 	reqReboot := false
 	reqDrain := false
-	for k, p := range dn.LoadedPlugins {
+
+	// check if any of the plugins required to drain or reboot the node
+	for k, p := range dn.enabledPlugins {
 		d, r := false, false
 		if dn.nodeState.GetName() == "" {
-			d, r, err = p.OnNodeStateAdd(latestState)
+			log.Log.V(0).Info("nodeStateSyncHandler(): calling OnNodeStateChange for a new node state")
 		} else {
-			d, r, err = p.OnNodeStateChange(dn.nodeState, latestState)
+			log.Log.V(0).Info("nodeStateSyncHandler(): calling OnNodeStateChange for an updated node state")
 		}
+		d, r, err = p.OnNodeStateChange(latestState)
 		if err != nil {
-			glog.Errorf("nodeStateSyncHandler(): plugin %s error: %v", k, err)
+			log.Log.Error(err, "nodeStateSyncHandler(): OnNodeStateChange plugin error", "plugin-name", k)
 			return err
 		}
-		glog.V(0).Infof("nodeStateSyncHandler(): plugin %s: reqDrain %v, reqReboot %v", k, d, r)
+		log.Log.V(0).Info("nodeStateSyncHandler(): OnNodeStateChange result", "plugin", k, "drain-required", d, "reboot-required", r)
 		reqDrain = reqDrain || d
 		reqReboot = reqReboot || r
 	}
-	glog.V(0).Infof("nodeStateSyncHandler(): reqDrain %v, reqReboot %v disableDrain %v", reqDrain, reqReboot, dn.disableDrain)
 
-	for k, p := range dn.LoadedPlugins {
-		if k != GenericPlugin {
+	// When running using systemd check if the applied configuration is the latest one
+	// or there is a new config we need to apply
+	// When using systemd configuration we write the file
+	if dn.useSystemdService {
+		systemdConfModified, err := systemd.WriteConfFile(latestState, dn.devMode, dn.platform)
+		if err != nil {
+			log.Log.Error(err, "nodeStateSyncHandler(): failed to write configuration file for systemd mode")
+			return err
+		}
+		if systemdConfModified {
+			// remove existing result file to make sure that we will not use outdated result, e.g. in case if
+			// systemd service was not triggered for some reason
+			err = systemd.RemoveSriovResult()
+			if err != nil {
+				log.Log.Error(err, "nodeStateSyncHandler(): failed to remove result file for systemd mode")
+				return err
+			}
+		}
+		reqDrain = reqDrain || systemdConfModified
+		reqReboot = reqReboot || systemdConfModified
+		log.Log.V(0).Info("nodeStateSyncHandler(): systemd mode WriteConfFile results",
+			"drain-required", reqDrain, "reboot-required", reqReboot, "disable-drain", dn.disableDrain)
+
+		err = systemd.WriteSriovSupportedNics()
+		if err != nil {
+			log.Log.Error(err, "nodeStateSyncHandler(): failed to write supported nic ids file for systemd mode")
+			return err
+		}
+	}
+	log.Log.V(0).Info("nodeStateSyncHandler(): aggregated daemon",
+		"drain-required", reqDrain, "reboot-required", reqReboot, "disable-drain", dn.disableDrain)
+
+	for k, p := range dn.enabledPlugins {
+		// Skip both the general and virtual plugin apply them last
+		if k != GenericPluginName && k != VirtualPluginName {
 			err := p.Apply()
 			if err != nil {
-				glog.Errorf("nodeStateSyncHandler(): plugin %s fail to apply: %v", k, err)
+				log.Log.Error(err, "nodeStateSyncHandler(): plugin Apply failed", "plugin-name", k)
 				return err
 			}
 		}
 	}
-	if utils.ClusterType == utils.ClusterTypeOpenshift {
+	if dn.openshiftContext.IsOpenshiftCluster() && !dn.openshiftContext.IsHypershift() {
 		if err = dn.getNodeMachinePool(); err != nil {
 			return err
 		}
 	}
-
 	if reqDrain {
-		if !dn.disableDrain {
-			ctx, cancel := context.WithCancel(context.TODO())
-			defer cancel()
+		if !dn.isNodeDraining() {
+			if !dn.disableDrain {
+				ctx, cancel := context.WithCancel(context.TODO())
+				defer cancel()
 
-			glog.Infof("nodeStateSyncHandler(): get drain lock for sriov daemon")
-			done := make(chan bool)
-			go dn.getDrainLock(ctx, done)
-			<-done
+				log.Log.Info("nodeStateSyncHandler(): get drain lock for sriov daemon")
+				done := make(chan bool)
+				go dn.getDrainLock(ctx, done)
+				<-done
+			}
 		}
 
-		if utils.ClusterType == utils.ClusterTypeOpenshift {
-			glog.Infof("nodeStateSyncHandler(): pause MCP")
+		if dn.openshiftContext.IsOpenshiftCluster() && !dn.openshiftContext.IsHypershift() {
+			log.Log.Info("nodeStateSyncHandler(): pause MCP")
 			if err := dn.pauseMCP(); err != nil {
 				return err
 			}
 		}
 
-		glog.Info("nodeStateSyncHandler(): drain node")
-		if err := dn.drainNode(); err != nil {
-			return err
+		if dn.disableDrain {
+			log.Log.Info("nodeStateSyncHandler(): disable drain is true skipping drain")
+		} else {
+			log.Log.Info("nodeStateSyncHandler(): drain node")
+			if err := dn.drainNode(); err != nil {
+				return err
+			}
 		}
 	}
 
-	if !reqReboot {
-		plugin, ok := dn.LoadedPlugins[GenericPlugin]
+	if !reqReboot && !dn.useSystemdService {
+		// For BareMetal machines apply the generic plugin
+		selectedPlugin, ok := dn.enabledPlugins[GenericPluginName]
 		if ok {
 			// Apply generic_plugin last
-			err = plugin.Apply()
+			err = selectedPlugin.Apply()
 			if err != nil {
-				glog.Errorf("nodeStateSyncHandler(): generic_plugin fail to apply: %v", err)
+				log.Log.Error(err, "nodeStateSyncHandler(): generic_plugin fail to apply")
+				return err
+			}
+		}
+
+		// For Virtual machines apply the virtual plugin
+		selectedPlugin, ok = dn.enabledPlugins[VirtualPluginName]
+		if ok {
+			// Apply virtual_plugin last
+			err = selectedPlugin.Apply()
+			if err != nil {
+				log.Log.Error(err, "nodeStateSyncHandler(): virtual_plugin failed to apply")
 				return err
 			}
 		}
 	}
 
 	if reqReboot {
-		glog.Info("nodeStateSyncHandler(): reboot node")
+		log.Log.Info("nodeStateSyncHandler(): reboot node")
+		dn.eventRecorder.SendEvent("RebootNode", "Reboot node has been initiated")
 		rebootNode()
 		return nil
 	}
 
 	// restart device plugin pod
-	glog.Info("nodeStateSyncHandler(): restart device plugin pod")
+	log.Log.Info("nodeStateSyncHandler(): restart device plugin pod")
 	if err := dn.restartDevicePluginPod(); err != nil {
-		glog.Errorf("nodeStateSyncHandler(): fail to restart device plugin pod: %v", err)
+		log.Log.Error(err, "nodeStateSyncHandler(): fail to restart device plugin pod")
 		return err
 	}
-	if anno, ok := dn.node.Annotations[annoKey]; ok && (anno == annoDraining || anno == annoMcpPaused) {
+	if dn.isNodeDraining() {
 		if err := dn.completeDrain(); err != nil {
-			glog.Errorf("nodeStateSyncHandler(): failed to complete draining: %v", err)
+			log.Log.Error(err, "nodeStateSyncHandler(): failed to complete draining")
 			return err
 		}
-	} else if !ok {
-		if err := dn.annotateNode(dn.name, annoIdle); err != nil {
-			glog.Errorf("nodeStateSyncHandler(): failed to annotate node: %v", err)
-			return err
+	} else {
+		if !dn.nodeHasAnnotation(annoKey, annoIdle) {
+			if err := dn.annotateNode(dn.name, annoIdle); err != nil {
+				log.Log.Error(err, "nodeStateSyncHandler(): failed to annotate node")
+				return err
+			}
 		}
 	}
-	glog.Info("nodeStateSyncHandler(): sync succeeded")
+	log.Log.Info("nodeStateSyncHandler(): sync succeeded")
 	dn.nodeState = latestState.DeepCopy()
-	dn.refreshCh <- Message{
-		syncStatus:    "Succeeded",
-		lastSyncError: "",
+	if dn.useSystemdService {
+		dn.refreshCh <- Message{
+			syncStatus:    sriovResult.SyncStatus,
+			lastSyncError: sriovResult.LastSyncError,
+		}
+	} else {
+		dn.refreshCh <- Message{
+			syncStatus:    syncStatusSucceeded,
+			lastSyncError: "",
+		}
 	}
 	// wait for writer to refresh the status
 	<-dn.syncCh
 	return nil
+}
+
+func (dn *Daemon) nodeHasAnnotation(annoKey string, value string) bool {
+	// Check if node already contains annotation
+	if anno, ok := dn.node.Annotations[annoKey]; ok && (anno == value) {
+		return true
+	}
+	return false
+}
+
+// isNodeDraining: check if the node is draining
+// both Draining and MCP paused labels will return true
+func (dn *Daemon) isNodeDraining() bool {
+	anno, ok := dn.node.Annotations[annoKey]
+	if !ok {
+		return false
+	}
+
+	return anno == annoDraining || anno == annoMcpPaused
 }
 
 func (dn *Daemon) completeDrain() error {
@@ -574,17 +750,17 @@ func (dn *Daemon) completeDrain() error {
 		}
 	}
 
-	if utils.ClusterType == utils.ClusterTypeOpenshift {
-		glog.Infof("completeDrain(): resume MCP %s", dn.mcpName)
+	if dn.openshiftContext.IsOpenshiftCluster() && !dn.openshiftContext.IsHypershift() {
+		log.Log.Info("completeDrain(): resume MCP", "mcp-name", dn.mcpName)
 		pausePatch := []byte("{\"spec\":{\"paused\":false}}")
-		if _, err := dn.mcClient.MachineconfigurationV1().MachineConfigPools().Patch(context.Background(), dn.mcpName, types.MergePatchType, pausePatch, metav1.PatchOptions{}); err != nil {
-			glog.Errorf("completeDrain(): failed to resume MCP %s: %v", dn.mcpName, err)
+		if _, err := dn.openshiftContext.McClient.MachineconfigurationV1().MachineConfigPools().Patch(context.Background(), dn.mcpName, types.MergePatchType, pausePatch, metav1.PatchOptions{}); err != nil {
+			log.Log.Error(err, "completeDrain(): failed to resume MCP", "mcp-name", dn.mcpName)
 			return err
 		}
 	}
 
 	if err := dn.annotateNode(dn.name, annoIdle); err != nil {
-		glog.Errorf("completeDrain(): failed to annotate node: %v", err)
+		log.Log.Error(err, "completeDrain(): failed to annotate node")
 		return err
 	}
 	return nil
@@ -593,7 +769,7 @@ func (dn *Daemon) completeDrain() error {
 func (dn *Daemon) restartDevicePluginPod() error {
 	dn.mu.Lock()
 	defer dn.mu.Unlock()
-	glog.V(2).Infof("restartDevicePluginPod(): try to restart device plugin pod")
+	log.Log.V(2).Info("restartDevicePluginPod(): try to restart device plugin pod")
 
 	var podToDelete string
 	pods, err := dn.kubeClient.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
@@ -602,84 +778,56 @@ func (dn *Daemon) restartDevicePluginPod() error {
 	})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			glog.Info("restartDevicePluginPod(): device plugin pod exited")
+			log.Log.Info("restartDevicePluginPod(): device plugin pod exited")
 			return nil
 		}
-		glog.Warningf("restartDevicePluginPod(): Failed to list device plugin pod: %s, retrying", err)
+		log.Log.Error(err, "restartDevicePluginPod(): Failed to list device plugin pod, retrying")
 		return err
 	}
 
 	if len(pods.Items) == 0 {
-		glog.Info("restartDevicePluginPod(): device plugin pod exited")
+		log.Log.Info("restartDevicePluginPod(): device plugin pod exited")
 		return nil
 	}
 	podToDelete = pods.Items[0].Name
 
-	glog.V(2).Infof("restartDevicePluginPod(): Found device plugin pod %s, deleting it", podToDelete)
+	log.Log.V(2).Info("restartDevicePluginPod(): Found device plugin pod, deleting it", "pod-name", podToDelete)
 	err = dn.kubeClient.CoreV1().Pods(namespace).Delete(context.Background(), podToDelete, metav1.DeleteOptions{})
 	if errors.IsNotFound(err) {
-		glog.Info("restartDevicePluginPod(): pod to delete not found")
+		log.Log.Info("restartDevicePluginPod(): pod to delete not found")
 		return nil
 	}
 	if err != nil {
-		glog.Errorf("restartDevicePluginPod(): Failed to delete device plugin pod: %s, retrying", err)
+		log.Log.Error(err, "restartDevicePluginPod(): Failed to delete device plugin pod, retrying")
 		return err
 	}
 
 	if err := wait.PollImmediateUntil(3*time.Second, func() (bool, error) {
 		_, err := dn.kubeClient.CoreV1().Pods(namespace).Get(context.Background(), podToDelete, metav1.GetOptions{})
 		if errors.IsNotFound(err) {
-			glog.Info("restartDevicePluginPod(): device plugin pod exited")
+			log.Log.Info("restartDevicePluginPod(): device plugin pod exited")
 			return true, nil
 		}
 
 		if err != nil {
-			glog.Warningf("restartDevicePluginPod(): Failed to check for device plugin exit: %s, retrying", err)
+			log.Log.Error(err, "restartDevicePluginPod(): Failed to check for device plugin exit, retrying")
 		} else {
-			glog.Infof("restartDevicePluginPod(): waiting for device plugin %s to exit", podToDelete)
+			log.Log.Info("restartDevicePluginPod(): waiting for device plugin pod to exit", "pod-name", podToDelete)
 		}
 		return false, nil
 	}, dn.stopCh); err != nil {
-		glog.Errorf("restartDevicePluginPod(): failed to wait for checking pod deletion: %v", err)
+		log.Log.Error(err, "restartDevicePluginPod(): failed to wait for checking pod deletion")
 		return err
 	}
 
 	return nil
 }
 
-func (dn *Daemon) loadVendorPlugins(ns *sriovnetworkv1.SriovNetworkNodeState) error {
-	var pl []string
-
-	if dn.platform == utils.VirtualOpenStack {
-		pl = append(pl, VirtualPlugin)
-	} else {
-		pl = registerPlugins(ns)
-		if utils.ClusterType != utils.ClusterTypeOpenshift {
-			pl = append(pl, K8sPlugin)
-		}
-		pl = append(pl, GenericPlugin)
-	}
-
-	dn.LoadedPlugins = make(map[string]VendorPlugin)
-
-	for _, pn := range pl {
-		filePath := filepath.Join(pluginsPath, pn+".so")
-		glog.Infof("loadVendorPlugins(): try to load plugin %s", pn)
-		p, err := loadPlugin(filePath)
-		if err != nil {
-			glog.Errorf("loadVendorPlugins(): fail to load plugin %s: %v", filePath, err)
-			return err
-		}
-		dn.LoadedPlugins[p.Name()] = p
-	}
-	return nil
-}
-
 func rebootNode() {
-	glog.Infof("rebootNode(): trigger node reboot")
+	log.Log.Info("rebootNode(): trigger node reboot")
 	exit, err := utils.Chroot("/host")
 	if err != nil {
-		glog.Errorf("rebootNode(): %v", err)
+		log.Log.Error(err, "rebootNode(): chroot command failed")
 	}
 	defer exit()
 	// creates a new transient systemd unit to reboot the system.
@@ -690,32 +838,22 @@ func rebootNode() {
 	// if kubelet failed to shutdown - that way the machine will still eventually reboot
 	// as systemd will time out the stop invocation.
 	cmd := exec.Command("systemd-run", "--unit", "sriov-network-config-daemon-reboot",
-		"--description", fmt.Sprintf("sriov-network-config-daemon reboot node"), "/bin/sh", "-c", "systemctl stop kubelet.service; reboot")
+		"--description", "sriov-network-config-daemon reboot node", "/bin/sh", "-c", "systemctl stop kubelet.service; reboot")
 
 	if err := cmd.Run(); err != nil {
-		glog.Errorf("failed to reboot node: %v", err)
+		log.Log.Error(err, "failed to reboot node")
 	}
-}
-
-type GlogLogger struct {
-}
-
-func (a GlogLogger) Log(v ...interface{}) {
-	glog.Info(v...)
-}
-
-func (a GlogLogger) Logf(format string, v ...interface{}) {
-	glog.Infof(format, v...)
 }
 
 func (dn *Daemon) annotateNode(node, value string) error {
-	glog.Infof("annotateNode(): Annotate node %s with: %s", node, value)
+	log.Log.Info("annotateNode(): Annotate node", "name", node, "value", value)
 
 	oldNode, err := dn.kubeClient.CoreV1().Nodes().Get(context.Background(), dn.name, metav1.GetOptions{})
 	if err != nil {
-		glog.Infof("annotateNode(): Failed to get node %s %v, retrying", node, err)
+		log.Log.Error(err, "annotateNode(): Failed to get node, retrying", "name", node)
 		return err
 	}
+
 	oldData, err := json.Marshal(oldNode)
 	if err != nil {
 		return err
@@ -741,7 +879,7 @@ func (dn *Daemon) annotateNode(node, value string) error {
 			patchBytes,
 			metav1.PatchOptions{})
 		if err != nil {
-			glog.Infof("annotateNode(): Failed to patch node %s: %v", node, err)
+			log.Log.Error(err, "annotateNode(): Failed to patch node", "name", node)
 			return err
 		}
 	}
@@ -751,12 +889,12 @@ func (dn *Daemon) annotateNode(node, value string) error {
 func (dn *Daemon) getNodeMachinePool() error {
 	desiredConfig, ok := dn.node.Annotations[daemonconsts.DesiredMachineConfigAnnotationKey]
 	if !ok {
-		glog.Errorf("getNodeMachinePool(): Failed to find the the desiredConfig Annotation")
+		log.Log.Error(nil, "getNodeMachinePool(): Failed to find the the desiredConfig Annotation")
 		return fmt.Errorf("getNodeMachinePool(): Failed to find the the desiredConfig Annotation")
 	}
-	mc, err := dn.mcClient.MachineconfigurationV1().MachineConfigs().Get(context.TODO(), desiredConfig, metav1.GetOptions{})
+	mc, err := dn.openshiftContext.McClient.MachineconfigurationV1().MachineConfigs().Get(context.TODO(), desiredConfig, metav1.GetOptions{})
 	if err != nil {
-		glog.Errorf("getNodeMachinePool(): Failed to get the desired Machine Config: %v", err)
+		log.Log.Error(err, "getNodeMachinePool(): Failed to get the desired Machine Config")
 		return err
 	}
 	for _, owner := range mc.OwnerReferences {
@@ -765,7 +903,8 @@ func (dn *Daemon) getNodeMachinePool() error {
 			return nil
 		}
 	}
-	glog.Error("getNodeMachinePool(): Failed to find the MCP of the node")
+
+	log.Log.Error(nil, "getNodeMachinePool(): Failed to find the MCP of the node")
 	return fmt.Errorf("getNodeMachinePool(): Failed to find the MCP of the node")
 }
 
@@ -792,7 +931,7 @@ func (dn *Daemon) getDrainLock(ctx context.Context, done chan bool) {
 		RetryPeriod:     1 * time.Second,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				glog.V(2).Info("getDrainLock(): started leading")
+				log.Log.V(2).Info("getDrainLock(): started leading")
 				for {
 					time.Sleep(3 * time.Second)
 					if dn.node.Annotations[annoKey] == annoMcpPaused {
@@ -801,30 +940,30 @@ func (dn *Daemon) getDrainLock(ctx context.Context, done chan bool) {
 						return
 					}
 					if dn.drainable {
-						glog.V(2).Info("getDrainLock(): no other node is draining")
+						log.Log.V(2).Info("getDrainLock(): no other node is draining")
 						err = dn.annotateNode(dn.name, annoDraining)
 						if err != nil {
-							glog.Errorf("getDrainLock(): Failed to annotate node: %v", err)
+							log.Log.Error(err, "getDrainLock(): failed to annotate node")
 							continue
 						}
 						done <- true
 						return
 					}
-					glog.V(3).Info("getDrainLock(): other node is draining, wait...")
+					log.Log.V(2).Info("getDrainLock(): other node is draining, wait...")
 				}
 			},
 			OnStoppedLeading: func() {
-				glog.V(2).Info("getDrainLock(): stopped leading")
+				log.Log.V(2).Info("getDrainLock(): stopped leading")
 			},
 		},
 	})
 }
 
 func (dn *Daemon) pauseMCP() error {
-	glog.Info("pauseMCP(): pausing MCP")
+	log.Log.Info("pauseMCP(): pausing MCP")
 	var err error
 
-	mcpInformerFactory := mcfginformers.NewSharedInformerFactory(dn.mcClient,
+	mcpInformerFactory := mcfginformers.NewSharedInformerFactory(dn.openshiftContext.McClient,
 		time.Second*30,
 	)
 	mcpInformer := mcpInformerFactory.Machineconfiguration().V1().MachineConfigPools().Informer()
@@ -839,56 +978,56 @@ func (dn *Daemon) pauseMCP() error {
 			return
 		}
 		// Always get the latest object
-		newMcp := &mcfgv1.MachineConfigPool{}
-		newMcp, err = dn.mcClient.MachineconfigurationV1().MachineConfigPools().Get(ctx, dn.mcpName, metav1.GetOptions{})
+		newMcp, err := dn.openshiftContext.McClient.MachineconfigurationV1().MachineConfigPools().Get(ctx, dn.mcpName, metav1.GetOptions{})
 		if err != nil {
-			glog.V(2).Infof("pauseMCP(): Failed to get MCP %s: %v", dn.mcpName, err)
+			log.Log.V(2).Error(err, "pauseMCP(): Failed to get MCP", "mcp-name", dn.mcpName)
 			return
 		}
 		if mcfgv1.IsMachineConfigPoolConditionFalse(newMcp.Status.Conditions, mcfgv1.MachineConfigPoolDegraded) &&
 			mcfgv1.IsMachineConfigPoolConditionTrue(newMcp.Status.Conditions, mcfgv1.MachineConfigPoolUpdated) &&
 			mcfgv1.IsMachineConfigPoolConditionFalse(newMcp.Status.Conditions, mcfgv1.MachineConfigPoolUpdating) {
-			glog.V(2).Infof("pauseMCP(): MCP %s is ready", dn.mcpName)
+			log.Log.V(2).Info("pauseMCP(): MCP is ready", "mcp-name", dn.mcpName)
 			if paused {
-				glog.V(2).Info("pauseMCP(): stop MCP informer")
+				log.Log.V(2).Info("pauseMCP(): stop MCP informer")
 				cancel()
 				return
 			}
 			if newMcp.Spec.Paused {
-				glog.V(2).Infof("pauseMCP(): MCP %s was paused by other, wait...", dn.mcpName)
+				log.Log.V(2).Info("pauseMCP(): MCP was paused by other, wait...", "mcp-name", dn.mcpName)
 				return
 			}
-			glog.Infof("pauseMCP(): pause MCP %s", dn.mcpName)
+			log.Log.Info("pauseMCP(): pause MCP", "mcp-name", dn.mcpName)
 			pausePatch := []byte("{\"spec\":{\"paused\":true}}")
-			_, err = dn.mcClient.MachineconfigurationV1().MachineConfigPools().Patch(context.Background(), dn.mcpName, types.MergePatchType, pausePatch, metav1.PatchOptions{})
+			_, err = dn.openshiftContext.McClient.MachineconfigurationV1().MachineConfigPools().Patch(context.Background(), dn.mcpName, types.MergePatchType, pausePatch, metav1.PatchOptions{})
 			if err != nil {
-				glog.V(2).Infof("pauseMCP(): Failed to pause MCP %s: %v", dn.mcpName, err)
+				log.Log.V(2).Error(err, "pauseMCP(): failed to pause MCP", "mcp-name", dn.mcpName)
 				return
 			}
 			err = dn.annotateNode(dn.name, annoMcpPaused)
 			if err != nil {
-				glog.V(2).Infof("pauseMCP(): Failed to annotate node: %v", err)
+				log.Log.V(2).Error(err, "pauseMCP(): Failed to annotate node")
 				return
 			}
 			paused = true
 			return
 		}
 		if paused {
-			glog.Infof("pauseMCP(): MCP is processing, resume MCP %s", dn.mcpName)
+			log.Log.Info("pauseMCP(): MCP is processing, resume MCP", "mcp-name", dn.mcpName)
 			pausePatch := []byte("{\"spec\":{\"paused\":false}}")
-			_, err = dn.mcClient.MachineconfigurationV1().MachineConfigPools().Patch(context.Background(), dn.mcpName, types.MergePatchType, pausePatch, metav1.PatchOptions{})
+			_, err = dn.openshiftContext.McClient.MachineconfigurationV1().MachineConfigPools().Patch(context.Background(), dn.mcpName, types.MergePatchType, pausePatch, metav1.PatchOptions{})
 			if err != nil {
-				glog.V(2).Infof("pauseMCP(): fail to resume MCP %s: %v", dn.mcpName, err)
+				log.Log.V(2).Error(err, "pauseMCP(): fail to resume MCP", "mcp-name", dn.mcpName)
 				return
 			}
 			err = dn.annotateNode(dn.name, annoDraining)
 			if err != nil {
-				glog.V(2).Infof("pauseMCP(): Failed to annotate node: %v", err)
+				log.Log.V(2).Error(err, "pauseMCP(): Failed to annotate node")
 				return
 			}
 			paused = false
 		}
-		glog.Infof("pauseMCP():MCP %s is not ready: %v, wait...", newMcp.GetName(), newMcp.Status.Conditions)
+		log.Log.Info("pauseMCP():MCP is not ready, wait...",
+			"mcp-name", newMcp.GetName(), "mcp-conditions", newMcp.Status.Conditions)
 	}
 
 	mcpInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -910,12 +1049,7 @@ func (dn *Daemon) pauseMCP() error {
 }
 
 func (dn *Daemon) drainNode() error {
-	if dn.disableDrain {
-		glog.Info("drainNode(): disable drain is true skipping drain")
-		return nil
-	}
-
-	glog.Info("drainNode(): Update prepared")
+	log.Log.Info("drainNode(): Update prepared")
 	var err error
 
 	backoff := wait.Backoff{
@@ -925,12 +1059,13 @@ func (dn *Daemon) drainNode() error {
 	}
 	var lastErr error
 
-	glog.Info("drainNode(): Start draining")
+	log.Log.Info("drainNode(): Start draining")
+	dn.eventRecorder.SendEvent("DrainNode", "Drain node has been initiated")
 	if err = wait.ExponentialBackoff(backoff, func() (bool, error) {
 		err := drain.RunCordonOrUncordon(dn.drainer, dn.node, true)
 		if err != nil {
 			lastErr = err
-			glog.Infof("Cordon failed with: %v, retrying", err)
+			log.Log.Error(err, "cordon failed, retrying")
 			return false, nil
 		}
 		err = drain.RunNodeDrain(dn.drainer, dn.name)
@@ -938,74 +1073,38 @@ func (dn *Daemon) drainNode() error {
 			return true, nil
 		}
 		lastErr = err
-		glog.Infof("Draining failed with: %v, retrying", err)
+		log.Log.Error(err, "Draining failed, retrying")
 		return false, nil
 	}); err != nil {
 		if err == wait.ErrWaitTimeout {
-			glog.Errorf("drainNode(): failed to drain node (%d tries): %v :%v", backoff.Steps, err, lastErr)
+			log.Log.Error(err, "drainNode(): failed to drain node", "tries", backoff.Steps, "last-error", lastErr)
 		}
-		glog.Errorf("drainNode(): failed to drain node: %v", err)
+		dn.eventRecorder.SendEvent("DrainNode", "Drain node failed")
+		log.Log.Error(err, "drainNode(): failed to drain node")
 		return err
 	}
-	glog.Info("drainNode(): drain complete")
+	dn.eventRecorder.SendEvent("DrainNode", "Drain node completed")
+	log.Log.Info("drainNode(): drain complete")
 	return nil
 }
 
-func registerPlugins(ns *sriovnetworkv1.SriovNetworkNodeState) []string {
-	pluginNames := make(map[string]bool)
-	for _, iface := range ns.Status.Interfaces {
-		if val, ok := pluginMap[iface.Vendor]; ok {
-			pluginNames[val] = true
-		}
+func (dn *Daemon) tryCreateSwitchdevUdevRule() error {
+	log.Log.V(2).Info("tryCreateSwitchdevUdevRule()")
+	nodeState, nodeStateErr := dn.client.SriovnetworkV1().SriovNetworkNodeStates(namespace).Get(
+		context.Background(),
+		dn.name,
+		metav1.GetOptions{},
+	)
+	if nodeStateErr != nil {
+		log.Log.Error(nodeStateErr, "could not fetch node state, skip updating switchdev udev rules", "name", dn.name)
+		return nil
 	}
-	rawList := reflect.ValueOf(pluginNames).MapKeys()
-	glog.Infof("registerPlugins(): %v", rawList)
-	nameList := make([]string, len(rawList))
-	for i := 0; i < len(rawList); i++ {
-		nameList[i] = rawList[i].String()
-	}
-	return nameList
-}
 
-func tryEnableTun() {
-	if err := utils.LoadKernelModule("tun"); err != nil {
-		glog.Errorf("tryEnableTun(): TUN kernel module not loaded: %v", err)
-	}
-}
-
-func tryEnableRdma() (bool, error) {
-	glog.V(2).Infof("tryEnableRdma()")
-	var stdout, stderr bytes.Buffer
-
-	cmd := exec.Command("/bin/bash", rdmaScriptsPath)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		glog.Errorf("tryEnableRdma(): fail to enable rdma %v: %v", err, cmd.Stderr)
-		return false, err
-	}
-	glog.V(2).Infof("tryEnableRdma(): %v", cmd.Stdout)
-
-	i, err := strconv.Atoi(strings.TrimSpace(stdout.String()))
-	if err == nil {
-		if i == 0 {
-			glog.V(2).Infof("tryEnableRdma(): RDMA kernel modules loaded")
-			return true, nil
-		} else {
-			glog.V(2).Infof("tryEnableRdma(): RDMA kernel modules not loaded")
-			return false, nil
-		}
-	}
-	return false, err
-}
-
-func tryCreateSwitchdevUdevRule(nodeState *sriovnetworkv1.SriovNetworkNodeState) error {
-	glog.V(2).Infof("tryCreateSwitchdevUdevRule()")
-	var new_content string
-	filePath := "/host/etc/udev/rules.d/20-switchdev.rules"
+	var newContent string
+	filePath := path.Join(utils.FilesystemRoot, "/host/etc/udev/rules.d/20-switchdev.rules")
 
 	for _, ifaceStatus := range nodeState.Status.Interfaces {
-		if ifaceStatus.EswitchMode == sriovnetworkv1.ESWITCHMODE_SWITCHDEV {
+		if ifaceStatus.EswitchMode == sriovnetworkv1.ESwithModeSwitchDev {
 			switchID, err := utils.GetPhysSwitchID(ifaceStatus.Name)
 			if err != nil {
 				return err
@@ -1014,82 +1113,61 @@ func tryCreateSwitchdevUdevRule(nodeState *sriovnetworkv1.SriovNetworkNodeState)
 			if err != nil {
 				return err
 			}
-			new_content = new_content + fmt.Sprintf("SUBSYSTEM==\"net\", ACTION==\"add|move\", ATTRS{phys_switch_id}==\"%s\", ATTR{phys_port_name}==\"pf%svf*\", IMPORT{program}=\"/etc/udev/switchdev-vf-link-name.sh $attr{phys_port_name}\", NAME=\"%s_$env{NUMBER}\"\n", switchID, strings.TrimPrefix(portName, "p"), ifaceStatus.Name)
+			newContent = newContent + fmt.Sprintf("SUBSYSTEM==\"net\", ACTION==\"add|move\", ATTRS{phys_switch_id}==\"%s\", ATTR{phys_port_name}==\"pf%svf*\", IMPORT{program}=\"/etc/udev/switchdev-vf-link-name.sh $attr{phys_port_name}\", NAME=\"%s_$env{NUMBER}\"\n", switchID, strings.TrimPrefix(portName, "p"), ifaceStatus.Name)
 		}
 	}
 
-	old_content, err := ioutil.ReadFile(filePath)
-	// if old_content = new_content, don't do anything
-	if err == nil && new_content == string(old_content) {
+	oldContent, err := os.ReadFile(filePath)
+	// if oldContent = newContent, don't do anything
+	if err == nil && newContent == string(oldContent) {
 		return nil
 	}
 
-	glog.V(2).Infof("Old udev content '%v' and new content '%v' differ. Writing to file %v.",
-		strings.TrimSuffix(string(old_content), "\n"),
-		strings.TrimSuffix(new_content, "\n"),
-		filePath)
+	log.Log.V(2).Info("Old udev content and new content differ. Writing new content to file.",
+		"old-content", strings.TrimSuffix(string(oldContent), "\n"),
+		"new-content", strings.TrimSuffix(newContent, "\n"),
+		"path", filePath)
 
-	// if the file does not exist or if old_content != new_content
+	// if the file does not exist or if oldContent != newContent
 	// write to file and create it if it doesn't exist
-	err = ioutil.WriteFile(filePath, []byte(new_content), 0664)
+	err = os.WriteFile(filePath, []byte(newContent), 0664)
 	if err != nil {
-		glog.Errorf("tryCreateSwitchdevUdevRule(): fail to write file: %v", err)
+		log.Log.Error(err, "tryCreateSwitchdevUdevRule(): fail to write file")
 		return err
 	}
 
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("/bin/bash", udevScriptsPath)
+	cmd := exec.Command("/bin/bash", path.Join(utils.FilesystemRoot, udevScriptsPath))
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	glog.V(2).Infof("tryCreateSwitchdevUdevRule(): %v", cmd.Stdout)
+	log.Log.V(2).Info("tryCreateSwitchdevUdevRule(): stdout", "output", cmd.Stdout)
 
 	i, err := strconv.Atoi(strings.TrimSpace(stdout.String()))
 	if err == nil {
 		if i == 0 {
-			glog.V(2).Infof("tryCreateSwitchdevUdevRule(): switchdev udev rules loaded")
+			log.Log.V(2).Info("tryCreateSwitchdevUdevRule(): switchdev udev rules loaded")
 		} else {
-			glog.V(2).Infof("tryCreateSwitchdevUdevRule(): switchdev udev rules not loaded")
+			log.Log.V(2).Info("tryCreateSwitchdevUdevRule(): switchdev udev rules not loaded")
 		}
 	}
 	return nil
 }
 
-func tryCreateNMUdevRule() error {
-	glog.V(2).Infof("tryCreateNMUdevRule()")
-	dirPath := "/host/etc/udev/rules.d/"
-	filePath := dirPath + "10-nm-unmanaged.rules"
-
-	new_content := fmt.Sprintf("ACTION==\"add|change|move\", ATTRS{device}==\"%s\", ENV{NM_UNMANAGED}=\"1\"\n", strings.Join(sriovnetworkv1.GetSupportedVfIds(), "|"))
-
-	// add NM udev rules for renaming VF rep
-	new_content = new_content + fmt.Sprintf("SUBSYSTEM==\"net\", ACTION==\"add|move\", ATTRS{phys_switch_id}!=\"\", ATTR{phys_port_name}==\"pf*vf*\", ENV{NM_UNMANAGED}=\"1\"\n")
-
-	old_content, err := ioutil.ReadFile(filePath)
-	// if old_content = new_content, don't do anything
-	if err == nil && new_content == string(old_content) {
-		return nil
+func (dn *Daemon) prepareNMUdevRule() error {
+	// we need to remove the Red Hat Virtio network device from the udev rule configuration
+	// if we don't remove it when running the config-daemon on a virtual node it will disconnect the node after a reboot
+	// even that the operator should not be installed on virtual environments that are not openstack
+	// we should not destroy the cluster if the operator is installed there
+	supportedVfIds := []string{}
+	for _, vfID := range sriovnetworkv1.GetSupportedVfIds() {
+		if vfID == "0x1000" || vfID == "0x1041" {
+			continue
+		}
+		supportedVfIds = append(supportedVfIds, vfID)
 	}
 
-	glog.V(2).Infof("Old udev content '%v' and new content '%v' differ. Writing to file %v.",
-		strings.TrimSuffix(string(old_content), "\n"),
-		strings.TrimSuffix(new_content, "\n"),
-		filePath)
-
-	err = os.MkdirAll(dirPath, os.ModePerm)
-	if err != nil && !os.IsExist(err) {
-		glog.Errorf("tryCreateNMUdevRule(): failed to create dir %s: %v", dirPath, err)
-		return err
-	}
-
-	// if the file does not exist or if old_content != new_content
-	// write to file and create it if it doesn't exist
-	err = ioutil.WriteFile(filePath, []byte(new_content), 0666)
-	if err != nil {
-		glog.Errorf("tryCreateNMUdevRule(): fail to write file: %v", err)
-		return err
-	}
-	return nil
+	return utils.PrepareNMUdevRule(supportedVfIds)
 }

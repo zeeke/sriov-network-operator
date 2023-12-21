@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,7 +39,6 @@ const (
 	filesDir          = "files"
 	ovsUnitsDir       = "ovs-units"
 	switchdevUnitsDir = "switchdev-units"
-	platformBase      = "bindata/manifests/machine-config"
 )
 
 func MakeRenderData() RenderData {
@@ -121,7 +119,7 @@ func renderTemplate(path string, d *RenderData) (*bytes.Buffer, error) {
 	tmpl.Funcs(template.FuncMap{"getOr": getOr, "isSet": isSet})
 	tmpl.Funcs(sprig.TxtFuncMap())
 
-	source, err := ioutil.ReadFile(path)
+	source, err := os.ReadFile(path)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to read manifest %s", path)
 	}

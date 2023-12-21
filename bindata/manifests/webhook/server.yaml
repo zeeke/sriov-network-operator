@@ -8,7 +8,7 @@ metadata:
   namespace: {{.Namespace}}
   annotations:
     kubernetes.io/description: |
-      This daemon set launches the network resource injector component on master nodes.
+      This daemon set launches the network resource injector component on master or worker nodes.
     release.openshift.io/version: "{{.ReleaseVersion}}"
 spec:
   selector:
@@ -31,21 +31,37 @@ spec:
       serviceAccountName: network-resources-injector-sa
       priorityClassName: "system-cluster-critical"
       nodeSelector:
-        beta.kubernetes.io/os: linux
+        kubernetes.io/os: linux
       affinity:
+        {{ if not .ExternalControlPlane }}
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
               - key: node-role.kubernetes.io/master
                 operator: Exists
+            - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+        {{ end }}
       tolerations:
+      {{ if not .ExternalControlPlane }}
       - key: "node-role.kubernetes.io/master"
+        operator: Exists
+        effect: NoSchedule
+      - key: "node-role.kubernetes.io/control-plane"
         operator: Exists
         effect: NoSchedule
       - key: "node.kubernetes.io/not-ready"
         operator: Exists
         effect: NoSchedule
+      {{ end }}
+      {{- if .ImagePullSecrets }}
+      imagePullSecrets:
+      {{- range .ImagePullSecrets }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }}
       containers:
       - name: webhook-server
         image: {{.NetworkResourcesInjectorImage}}
@@ -56,7 +72,6 @@ spec:
         - -port=6443
         - -tls-private-key-file=/etc/tls/tls.key
         - -tls-cert-file=/etc/tls/tls.crt
-        - -alsologtostderr=true
         - -insecure=true
         env:
         - name: NAMESPACE

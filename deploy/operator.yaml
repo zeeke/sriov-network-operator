@@ -23,9 +23,15 @@ spec:
             - matchExpressions:
               - key: node-role.kubernetes.io/master
                 operator: Exists
+            - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
       tolerations:
       - effect: NoSchedule
         key: node-role.kubernetes.io/master
+        operator: Exists
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/control-plane
         operator: Exists
       serviceAccountName: sriov-network-operator
       priorityClassName: "system-node-critical"
@@ -35,7 +41,6 @@ spec:
           image: $SRIOV_NETWORK_OPERATOR_IMAGE
           command:
           - sriov-network-operator
-          imagePullPolicy: IfNotPresent
           resources:
             requests:
               cpu: 100m
@@ -63,6 +68,8 @@ spec:
               value: $RESOURCE_PREFIX
             - name: ENABLE_ADMISSION_CONTROLLER
               value: "$ENABLE_ADMISSION_CONTROLLER"
+            - name: DEV_MODE
+              value: "$DEV_MODE"
             - name: NAMESPACE
               valueFrom:
                 fieldRef:
@@ -71,6 +78,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             - name: RELEASE_VERSION
               value: 4.3.0
             - name: SRIOV_CNI_BIN_PATH

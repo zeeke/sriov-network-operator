@@ -1,8 +1,22 @@
+/*
+Copyright 2023.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"net"
 	"net/url"
@@ -10,12 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/glog"
-	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
-	snclientset "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/client/clientset/versioned"
-	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/daemon"
-	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/utils"
-	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/version"
+	configv1 "github.com/openshift/api/config/v1"
+	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -23,9 +33,14 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/connrotation"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
-	mcclientset "github.com/openshift/machine-config-operator/pkg/generated/clientset/versioned"
+	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
+	snclientset "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/client/clientset/versioned"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/daemon"
+	snolog "github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/log"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/utils"
+	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/version"
 )
 
 var (
@@ -33,32 +48,35 @@ var (
 		Use:   "start",
 		Short: "Starts SR-IOV Network Config Daemon",
 		Long:  "",
-		Run:   runStartCmd,
+		RunE:  runStartCmd,
 	}
 
 	startOpts struct {
 		kubeconfig string
 		nodeName   string
+		systemd    bool
 	}
 )
 
 func init() {
 	rootCmd.AddCommand(startCmd)
 	startCmd.PersistentFlags().StringVar(&startOpts.kubeconfig, "kubeconfig", "", "Kubeconfig file to access a remote cluster (testing only)")
-	startCmd.PersistentFlags().StringVar(&startOpts.nodeName, "node-name", "", "kubernetes node name daemon is managing.")
+	startCmd.PersistentFlags().StringVar(&startOpts.nodeName, "node-name", "", "kubernetes node name daemon is managing")
+	startCmd.PersistentFlags().BoolVar(&startOpts.systemd, "use-systemd-service", false, "use config daemon in systemd mode")
 }
 
-func runStartCmd(cmd *cobra.Command, args []string) {
-	flag.Set("logtostderr", "true")
-	flag.Parse()
+func runStartCmd(cmd *cobra.Command, args []string) error {
+	// init logger
+	snolog.InitLog()
+	setupLog := log.Log.WithName("sriov-network-config-daemon")
 
 	// To help debugging, immediately log version
-	glog.V(2).Infof("Version: %+v", version.Version)
+	setupLog.V(2).Info("sriov-network-config-daemon", "version", version.Version)
 
 	if startOpts.nodeName == "" {
 		name, ok := os.LookupEnv("NODE_NAME")
 		if !ok || name == "" {
-			glog.Fatalf("node-name is required")
+			return fmt.Errorf("node-name is required")
 		}
 		startOpts.nodeName = name
 	}
@@ -87,19 +105,19 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 	if os.Getenv("CLUSTER_TYPE") == utils.ClusterTypeOpenshift {
 		kubeconfig, err := clientcmd.LoadFromFile("/host/etc/kubernetes/kubeconfig")
 		if err != nil {
-			glog.Errorf("failed to load kubelet kubeconfig: %v", err)
+			setupLog.Error(err, "failed to load kubelet kubeconfig")
 		}
 		clusterName := kubeconfig.Contexts[kubeconfig.CurrentContext].Cluster
 		apiURL := kubeconfig.Clusters[clusterName].Server
 
 		url, err := url.Parse(apiURL)
 		if err != nil {
-			glog.Errorf("failed to parse api url from kubelet kubeconfig: %v", err)
+			setupLog.Error(err, "failed to parse api url from kubelet kubeconfig")
 		}
 
 		// The kubernetes in-cluster functions don't let you override the apiserver
 		// directly; gotta "pass" it via environment vars.
-		glog.V(0).Infof("overriding kubernetes api to %s", apiURL)
+		setupLog.V(0).Info("overriding kubernetes api", "new-url", apiURL)
 		os.Setenv("KUBERNETES_SERVICE_HOST", url.Hostname())
 		os.Setenv("KUBERNETES_SERVICE_PORT", url.Port())
 	}
@@ -113,29 +131,44 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 	}
 
 	if err != nil {
-		panic(err.Error())
+		return err
 	}
 
 	closeAllConns, err := updateDialer(config)
 	if err != nil {
-		panic(err.Error())
+		return err
 	}
 
 	sriovnetworkv1.AddToScheme(scheme.Scheme)
 	mcfgv1.AddToScheme(scheme.Scheme)
+	configv1.Install(scheme.Scheme)
 
 	snclient := snclientset.NewForConfigOrDie(config)
 	kubeclient := kubernetes.NewForConfigOrDie(config)
-	mcclient := mcclientset.NewForConfigOrDie(config)
+	openshiftContext, err := utils.NewOpenshiftContext(config, scheme.Scheme)
+	if err != nil {
+		return err
+	}
 
 	config.Timeout = 5 * time.Second
 	writerclient := snclientset.NewForConfigOrDie(config)
-	glog.V(0).Info("starting node writer")
-	nodeWriter := daemon.NewNodeStateStatusWriter(writerclient, startOpts.nodeName, closeAllConns)
+
+	mode := os.Getenv("DEV_MODE")
+	devMode := false
+	if mode == "TRUE" {
+		devMode = true
+		setupLog.V(0).Info("dev mode enabled")
+	}
+
+	eventRecorder := daemon.NewEventRecorder(writerclient, startOpts.nodeName, kubeclient)
+	defer eventRecorder.Shutdown()
+
+	setupLog.V(0).Info("starting node writer")
+	nodeWriter := daemon.NewNodeStateStatusWriter(writerclient, startOpts.nodeName, closeAllConns, eventRecorder, devMode)
 
 	destdir := os.Getenv("DEST_DIR")
 	if destdir == "" {
-		destdir = "/host/etc"
+		destdir = "/host/tmp"
 	}
 
 	platformType := utils.Baremetal
@@ -148,30 +181,47 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 			}
 		}
 	} else {
-		glog.Warningf("Failed to fetch node state %s, %v!", startOpts.nodeName, err)
+		setupLog.Error(err, "failed to fetch node state, exiting", "node-name", startOpts.nodeName)
+		return err
 	}
-	glog.V(0).Infof("Running on platform: %s", platformType.String())
+	setupLog.Info("Running on", "platform", platformType.String())
+
+	var namespace = os.Getenv("NAMESPACE")
+	if err := sriovnetworkv1.InitNicIDMapFromConfigMap(kubeclient, namespace); err != nil {
+		setupLog.Error(err, "failed to run init NicIdMap")
+		return err
+	}
+
+	eventRecorder.SendEvent("ConfigDaemonStart", "Config Daemon starting")
 
 	// block the deamon process until nodeWriter finish first its run
-	nodeWriter.Run(stopCh, refreshCh, syncCh, destdir, true, platformType)
-	go nodeWriter.Run(stopCh, refreshCh, syncCh, "", false, platformType)
+	err = nodeWriter.RunOnce(destdir, platformType)
+	if err != nil {
+		setupLog.Error(err, "failed to run writer")
+		return err
+	}
+	go nodeWriter.Run(stopCh, refreshCh, syncCh, platformType)
 
-	glog.V(0).Info("Starting SriovNetworkConfigDaemon")
+	setupLog.V(0).Info("Starting SriovNetworkConfigDaemon")
 	err = daemon.New(
 		startOpts.nodeName,
 		snclient,
 		kubeclient,
-		mcclient,
+		openshiftContext,
 		exitCh,
 		stopCh,
 		syncCh,
 		refreshCh,
 		platformType,
+		startOpts.systemd,
+		eventRecorder,
+		devMode,
 	).Run(stopCh, exitCh)
 	if err != nil {
-		glog.Errorf("failed to run daemon: %v", err)
+		setupLog.Error(err, "failed to run daemon")
 	}
-	glog.V(0).Info("Shutting down SriovNetworkConfigDaemon")
+	setupLog.V(0).Info("Shutting down SriovNetworkConfigDaemon")
+	return err
 }
 
 // updateDialer instruments a restconfig with a dial. the returned function allows forcefully closing all active connections.
@@ -179,7 +229,8 @@ func updateDialer(clientConfig *rest.Config) (func(), error) {
 	if clientConfig.Transport != nil || clientConfig.Dial != nil {
 		return nil, fmt.Errorf("there is already a transport or dialer configured")
 	}
-	d := connrotation.NewDialer((&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext)
+	f := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	d := connrotation.NewDialer(f.DialContext)
 	clientConfig.Dial = d.DialContext
 	return d.CloseAll, nil
 }

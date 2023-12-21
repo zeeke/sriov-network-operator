@@ -21,16 +21,18 @@ import (
 	"reflect"
 
 	netattdefv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 )
@@ -63,7 +65,7 @@ func (r *SriovIBNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Fetch the SriovNetwork instance
 	instance := &sriovnetworkv1.SriovIBNetwork{}
-	err = r.Get(context.TODO(), req.NamespacedName, instance)
+	err = r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -83,7 +85,7 @@ func (r *SriovIBNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// registering our finalizer.
 		if !sriovnetworkv1.StringInArray(sriovnetworkv1.NETATTDEFFINALIZERNAME, instance.ObjectMeta.Finalizers) {
 			instance.ObjectMeta.Finalizers = append(instance.ObjectMeta.Finalizers, sriovnetworkv1.NETATTDEFFINALIZERNAME)
-			if err := r.Update(context.Background(), instance); err != nil {
+			if err := r.Update(ctx, instance); err != nil {
 				return reconcile.Result{}, err
 			}
 		}
@@ -101,7 +103,7 @@ func (r *SriovIBNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			var found bool
 			instance.ObjectMeta.Finalizers, found = sriovnetworkv1.RemoveString(sriovnetworkv1.NETATTDEFFINALIZERNAME, instance.ObjectMeta.Finalizers)
 			if found {
-				if err := r.Update(context.Background(), instance); err != nil {
+				if err := r.Update(ctx, instance); err != nil {
 					return reconcile.Result{}, err
 				}
 			}
@@ -113,12 +115,18 @@ func (r *SriovIBNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return reconcile.Result{}, err
 	}
 	netAttDef := &netattdefv1.NetworkAttachmentDefinition{}
-	err = r.Scheme.Convert(raw, netAttDef, context.TODO())
+	err = r.Scheme.Convert(raw, netAttDef, ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	// format CNI config json in CR for easier readability
+	netAttDef.Spec.Config, err = formatJSON(netAttDef.Spec.Config)
+	if err != nil {
+		reqLogger.Error(err, "Couldn't process rendered NetworkAttachmentDefinition config", "Namespace", netAttDef.Namespace, "Name", netAttDef.Name)
+		return reconcile.Result{}, err
+	}
 	if lnns, ok := instance.GetAnnotations()[sriovnetworkv1.LASTNETWORKNAMESPACE]; ok && netAttDef.GetNamespace() != lnns {
-		err = r.Delete(context.TODO(), &netattdefv1.NetworkAttachmentDefinition{
+		err = r.Delete(ctx, &netattdefv1.NetworkAttachmentDefinition{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      instance.GetName(),
 				Namespace: lnns,
@@ -131,19 +139,25 @@ func (r *SriovIBNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	// Check if this NetworkAttachmentDefinition already exists
 	found := &netattdefv1.NetworkAttachmentDefinition{}
-
-	err = r.Get(context.TODO(), types.NamespacedName{Name: netAttDef.Name, Namespace: netAttDef.Namespace}, found)
+	err = r.Get(ctx, types.NamespacedName{Name: netAttDef.Name, Namespace: netAttDef.Namespace}, found)
 	if err != nil {
 		if errors.IsNotFound(err) {
+			targetNamespace := &corev1.Namespace{}
+			err = r.Get(ctx, types.NamespacedName{Name: netAttDef.Namespace}, targetNamespace)
+			if errors.IsNotFound(err) {
+				reqLogger.Info("Target namespace doesn't exist, NetworkAttachmentDefinition will be created when namespace is available", "Namespace", netAttDef.Namespace, "Name", netAttDef.Name)
+				return reconcile.Result{}, nil
+			}
+
 			reqLogger.Info("NetworkAttachmentDefinition CR not exist, creating")
-			err = r.Create(context.TODO(), netAttDef)
+			err = r.Create(ctx, netAttDef)
 			if err != nil {
 				reqLogger.Error(err, "Couldn't create NetworkAttachmentDefinition CR", "Namespace", netAttDef.Namespace, "Name", netAttDef.Name)
 				return reconcile.Result{}, err
 			}
 			anno := map[string]string{sriovnetworkv1.LASTNETWORKNAMESPACE: netAttDef.Namespace}
 			instance.SetAnnotations(anno)
-			if err := r.Update(context.Background(), instance); err != nil {
+			if err := r.Update(ctx, instance); err != nil {
 				return reconcile.Result{}, err
 			}
 		} else {
@@ -155,7 +169,7 @@ func (r *SriovIBNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if !reflect.DeepEqual(found.Spec, netAttDef.Spec) || !reflect.DeepEqual(found.GetAnnotations(), netAttDef.GetAnnotations()) {
 			reqLogger.Info("Update NetworkAttachmentDefinition CR", "Namespace", netAttDef.Namespace, "Name", netAttDef.Name)
 			netAttDef.SetResourceVersion(found.GetResourceVersion())
-			err = r.Update(context.TODO(), netAttDef)
+			err = r.Update(ctx, netAttDef)
 			if err != nil {
 				reqLogger.Error(err, "Couldn't update NetworkAttachmentDefinition CR", "Namespace", netAttDef.Namespace, "Name", netAttDef.Name)
 				return reconcile.Result{}, err
@@ -167,8 +181,32 @@ func (r *SriovIBNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SriovIBNetworkReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Reconcile when the target namespace is created after the SriovNetwork object.
+	namespaceHandler := handler.Funcs{
+		CreateFunc: r.namespaceHandlerCreate,
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sriovnetworkv1.SriovIBNetwork{}).
-		Watches(&source.Kind{Type: &netattdefv1.NetworkAttachmentDefinition{}}, &handler.EnqueueRequestForObject{}).
+		Watches(&netattdefv1.NetworkAttachmentDefinition{}, &handler.EnqueueRequestForObject{}).
+		Watches(&corev1.Namespace{}, &namespaceHandler).
 		Complete(r)
+}
+
+func (r *SriovIBNetworkReconciler) namespaceHandlerCreate(ctx context.Context, e event.CreateEvent, q workqueue.RateLimitingInterface) {
+	ibNetworkList := sriovnetworkv1.SriovIBNetworkList{}
+	err := r.List(ctx,
+		&ibNetworkList,
+		client.MatchingFields{"spec.networkNamespace": e.Object.GetName()},
+	)
+	if err != nil {
+		log.Log.WithName("SriovIBNetworkReconciler").
+			Info("Can't list SriovIBNetworkReconciler for namespace", "resource", e.Object.GetName(), "error", err)
+	}
+
+	for _, network := range ibNetworkList.Items {
+		q.Add(reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: network.Namespace,
+			Name:      network.Name,
+		}})
+	}
 }
