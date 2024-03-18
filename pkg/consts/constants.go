@@ -55,23 +55,25 @@ const (
 	SriovSwitchDevConfPath     = SriovConfBasePath + "/sriov_config.json"
 	SriovHostSwitchDevConfPath = Host + SriovSwitchDevConfPath
 
-	DrainAnnotationState         = "sriovnetwork.openshift.io/state"
-	DrainAnnotationStateRequired = "sriovnetwork.openshift.io/state-required"
-	DrainAnnotationTime          = "sriovnetwork.openshift.io/state-time"
+	MachineConfigPoolPausedAnnotation       = "sriovnetwork.openshift.io/state"
+	MachineConfigPoolPausedAnnotationIdle   = "Idle"
+	MachineConfigPoolPausedAnnotationPaused = "Paused"
 
-	DrainIdle        DrainState = "Idle"
-	DrainDisabled    DrainState = "Drain_Disabled"
-	DrainRequired    DrainState = "Drain_Required"
-	RebootRequired   DrainState = "Reboot_Required"
-	DrainMcpPausing  DrainState = "Draining_MCP_Pausing"
-	DrainMcpPaused   DrainState = "Draining_MCP_Paused"
-	Draining         DrainState = "Draining"
-	DrainingComplete DrainState = "Draining_Complete"
-	RebootComplete   DrainState = "Reboot_Complete"
+	NodeDrainAnnotation             = "sriovnetwork.openshift.io/state"
+	NodeStateDrainAnnotation        = "sriovnetwork.openshift.io/desired-state"
+	NodeStateDrainAnnotationCurrent = "sriovnetwork.openshift.io/current-state"
+	DrainIdle                       = "Idle"
+	DrainRequired                   = "Drain_Required"
+	RebootRequired                  = "Reboot_Required"
+	Draining                        = "Draining"
+	DrainComplete                   = "DrainComplete"
 
 	SyncStatusSucceeded  = "Succeeded"
 	SyncStatusFailed     = "Failed"
 	SyncStatusInProgress = "InProgress"
+
+	DrainDeleted = "Deleted"
+	DrainEvicted = "Evicted"
 
 	MCPPauseAnnotationState = "sriovnetwork.openshift.io/state"
 	MCPPauseAnnotationTime  = "sriovnetwork.openshift.io/time"
@@ -91,9 +93,11 @@ const (
 	BusVdpa               = "vdpa"
 
 	UdevFolder          = "/etc/udev"
+	HostUdevFolder      = Host + UdevFolder
 	UdevRulesFolder     = UdevFolder + "/rules.d"
 	HostUdevRulesFolder = Host + UdevRulesFolder
 	UdevDisableNM       = "/bindata/scripts/udev-find-sriov-pf.sh"
+	UdevRepName         = "/bindata/scripts/switchdev-vf-link-name.sh"
 	// nolint:goconst
 	NMUdevRule = `SUBSYSTEM=="net", ` +
 		`ACTION=="add|change|move", ` +

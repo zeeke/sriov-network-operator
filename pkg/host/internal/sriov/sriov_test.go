@@ -67,19 +67,18 @@ var _ = Describe("SRIOV", func() {
 			netlinkLibMock.EXPECT().DevLinkGetDeviceByName("pci", "0000:d8:00.0").Return(
 				&netlink.DevlinkDevice{Attrs: netlink.DevlinkDevAttrs{Eswitch: netlink.DevlinkDevEswitchAttr{Mode: "switchdev"}}},
 				nil)
-			mode, err := s.GetNicSriovMode("0000:d8:00.0")
-			Expect(err).NotTo(HaveOccurred())
+			mode := s.GetNicSriovMode("0000:d8:00.0")
 			Expect(mode).To(Equal("switchdev"))
 		})
 		It("devlink returns error", func() {
 			netlinkLibMock.EXPECT().DevLinkGetDeviceByName("pci", "0000:d8:00.0").Return(nil, testError)
-			_, err := s.GetNicSriovMode("0000:d8:00.0")
-			Expect(err).To(MatchError(testError))
+			mode := s.GetNicSriovMode("0000:d8:00.0")
+
+			Expect(mode).To(Equal("legacy"))
 		})
 		It("devlink not supported - fail to get name", func() {
 			netlinkLibMock.EXPECT().DevLinkGetDeviceByName("pci", "0000:d8:00.0").Return(nil, syscall.ENODEV)
-			mode, err := s.GetNicSriovMode("0000:d8:00.0")
-			Expect(err).NotTo(HaveOccurred())
+			mode := s.GetNicSriovMode("0000:d8:00.0")
 			Expect(mode).To(Equal("legacy"))
 		})
 	})
@@ -166,7 +165,7 @@ var _ = Describe("SRIOV", func() {
 						}},
 				}},
 				[]sriovnetworkv1.InterfaceExt{{PciAddress: "0000:d8:00.0"}, {PciAddress: "0000:d8:00.1"}},
-				map[string]bool{"0000:d8:00.1": true}, false)).NotTo(HaveOccurred())
+				false)).NotTo(HaveOccurred())
 			helpers.GinkgoAssertFileContentsEquals("/sys/bus/pci/devices/0000:d8:00.0/sriov_numvfs", "2")
 		})
 		It("should configure IB", func() {
@@ -215,7 +214,7 @@ var _ = Describe("SRIOV", func() {
 						}},
 				}},
 				[]sriovnetworkv1.InterfaceExt{{PciAddress: "0000:d8:00.0"}},
-				map[string]bool{}, false)).NotTo(HaveOccurred())
+				false)).NotTo(HaveOccurred())
 			helpers.GinkgoAssertFileContentsEquals("/sys/bus/pci/devices/0000:d8:00.0/sriov_numvfs", "1")
 		})
 
@@ -279,7 +278,7 @@ var _ = Describe("SRIOV", func() {
 						}},
 				}},
 				[]sriovnetworkv1.InterfaceExt{{PciAddress: "0000:d8:00.0"}},
-				map[string]bool{}, false)).NotTo(HaveOccurred())
+				false)).NotTo(HaveOccurred())
 			helpers.GinkgoAssertFileContentsEquals("/sys/bus/pci/devices/0000:d8:00.0/sriov_numvfs", "1")
 		})
 
@@ -302,7 +301,7 @@ var _ = Describe("SRIOV", func() {
 						}},
 				}},
 				[]sriovnetworkv1.InterfaceExt{{PciAddress: "0000:d8:00.0"}},
-				map[string]bool{}, false)).To(HaveOccurred())
+				false)).To(HaveOccurred())
 		})
 
 		It("externally managed - wrong MTU", func() {
@@ -328,7 +327,7 @@ var _ = Describe("SRIOV", func() {
 						}},
 				}},
 				[]sriovnetworkv1.InterfaceExt{{PciAddress: "0000:d8:00.0"}},
-				map[string]bool{}, false)).To(HaveOccurred())
+				false)).To(HaveOccurred())
 		})
 
 		It("reset device", func() {
@@ -359,8 +358,7 @@ var _ = Describe("SRIOV", func() {
 						LinkType:   "ETH",
 						NumVfs:     2,
 						TotalVfs:   2,
-					}},
-				map[string]bool{}, false)).NotTo(HaveOccurred())
+					}}, false)).NotTo(HaveOccurred())
 			helpers.GinkgoAssertFileContentsEquals("/sys/bus/pci/devices/0000:d8:00.0/sriov_numvfs", "0")
 		})
 		It("reset device - skip external", func() {
@@ -379,8 +377,7 @@ var _ = Describe("SRIOV", func() {
 						PciAddress: "0000:d8:00.0",
 						NumVfs:     2,
 						TotalVfs:   2,
-					}},
-				map[string]bool{}, false)).NotTo(HaveOccurred())
+					}}, false)).NotTo(HaveOccurred())
 		})
 		It("should configure - skipVFConfiguration is true", func() {
 			helpers.GinkgoConfigureFakeFS(&fakefilesystem.FS{
@@ -424,7 +421,7 @@ var _ = Describe("SRIOV", func() {
 						}},
 				}},
 				[]sriovnetworkv1.InterfaceExt{{PciAddress: "0000:d8:00.0"}},
-				map[string]bool{}, true)).NotTo(HaveOccurred())
+				true)).NotTo(HaveOccurred())
 			helpers.GinkgoAssertFileContentsEquals("/sys/bus/pci/devices/0000:d8:00.0/sriov_numvfs", "2")
 		})
 	})

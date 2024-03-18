@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	uns "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -258,7 +259,12 @@ func NeedToUpdateSriov(ifaceSpec *Interface, ifaceStatus *InterfaceExt) bool {
 			return true
 		}
 	}
-
+	currentEswitchMode := GetEswitchModeFromStatus(ifaceStatus)
+	desiredEswitchMode := GetEswitchModeFromSpec(ifaceSpec)
+	if currentEswitchMode != desiredEswitchMode {
+		log.V(2).Info("NeedToUpdateSriov(): EswitchMode needs update", "desired", desiredEswitchMode, "current", currentEswitchMode)
+		return true
+	}
 	if ifaceSpec.NumVfs != ifaceStatus.NumVfs {
 		log.V(2).Info("NeedToUpdateSriov(): NumVfs needs update", "desired", ifaceSpec.NumVfs, "current", ifaceStatus.NumVfs)
 		return true
@@ -299,11 +305,18 @@ func NeedToUpdateSriov(ifaceSpec *Interface, ifaceStatus *InterfaceExt) bool {
 							return true
 						}
 					}
+					if groupSpec.VdpaType != vfStatus.VdpaType {
+						log.V(2).Info("NeedToUpdateSriov(): VF VdpaType mismatch",
+							"desired", groupSpec.VdpaType, "current", vfStatus.VdpaType)
+						return true
+					}
 					break
 				}
 			}
-			if !ingroup && StringInArray(vfStatus.Driver, vars.DpdkDrivers) {
-				// VF which has DPDK driver loaded but not in any group, needs to be reset to default driver.
+			if !ingroup && (StringInArray(vfStatus.Driver, vars.DpdkDrivers) || vfStatus.VdpaType != "") {
+				// need to reset VF if it is not a part of a group and:
+				// a. has DPDK driver loaded
+				// b. has VDPA device
 				return true
 			}
 		}
@@ -822,4 +835,40 @@ func NetFilterMatch(netFilter string, netValue string) (isMatch bool) {
 	}
 
 	return netFilterResult[0][1] == netValueResult[0][1] && netFilterResult[0][2] == netValueResult[0][2]
+}
+
+// MaxUnavailable calculate the max number of unavailable nodes to represent the number of nodes
+// we can drain in parallel
+func (s *SriovNetworkPoolConfig) MaxUnavailable(numOfNodes int) (int, error) {
+	// this means we want to drain all the nodes in parallel
+	if s.Spec.MaxUnavailable == nil {
+		return -1, nil
+	}
+	intOrPercent := *s.Spec.MaxUnavailable
+
+	if intOrPercent.Type == intstrutil.String {
+		if strings.HasSuffix(intOrPercent.StrVal, "%") {
+			i := strings.TrimSuffix(intOrPercent.StrVal, "%")
+			v, err := strconv.Atoi(i)
+			if err != nil {
+				return 0, fmt.Errorf("invalid value %q: %v", intOrPercent.StrVal, err)
+			}
+			if v > 100 || v < 1 {
+				return 0, fmt.Errorf("invalid value: percentage needs to be between 1 and 100")
+			}
+		} else {
+			return 0, fmt.Errorf("invalid type: strings needs to be a percentage")
+		}
+	}
+
+	maxunavail, err := intstrutil.GetScaledValueFromIntOrPercent(&intOrPercent, numOfNodes, false)
+	if err != nil {
+		return 0, err
+	}
+
+	if maxunavail < 0 {
+		return 0, fmt.Errorf("negative number is not allowed")
+	}
+
+	return maxunavail, nil
 }
