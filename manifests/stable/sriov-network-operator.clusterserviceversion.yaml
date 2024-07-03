@@ -372,19 +372,19 @@ spec:
                     fieldRef:
                       fieldPath: metadata.annotations['olm.targetNamespaces']
                 - name: SRIOV_CNI_IMAGE
-                  value: quay.io/openshift/origin-sriov-cni:4.17
+                  value: registry.redhat.io/openshift4/sriov-cni-rhel9@sha256:ae9c0ec2ee3699edcb16747b704963002c25843329d92641d78d93f148ce859a
                 - name: SRIOV_DEVICE_PLUGIN_IMAGE
-                  value: quay.io/openshift/origin-sriov-network-device-plugin:4.17
+                  value: registry.redhat.io/openshift4/ose-sriov-network-device-plugin-rhel9@sha256:1b8cfce265be62f7ad7e01fdc0d0f0bed0b723bebda399de83a7db1b1f6f86ee
                 - name: NETWORK_RESOURCES_INJECTOR_IMAGE
-                  value: quay.io/openshift/origin-sriov-dp-admission-controller:4.17
+                  value: registry.redhat.io/openshift4/ose-sriov-dp-admission-controller-rhel9@sha256:cfb5e2cf6df8e231bd85fee6f0c808f64e0f9af8cc1dcc835bdf4d4f4857cfab
                 - name: OPERATOR_NAME
                   value: sriov-network-operator
                 - name: SRIOV_NETWORK_CONFIG_DAEMON_IMAGE
-                  value: quay.io/openshift/origin-sriov-network-config-daemon:4.17
+                  value: registry.redhat.io/openshift4/ose-sriov-network-config-daemon-rhel9@sha256:8ce90402c99d980cd12a95ab663af7afb1cb17079942aa011beb91829d500b0b
                 - name: SRIOV_NETWORK_WEBHOOK_IMAGE
-                  value: quay.io/openshift/origin-sriov-network-webhook:4.17
+                  value: registry.redhat.io/openshift4/ose-sriov-network-webhook-rhel9@sha256:f4a6d016533911c3d1b7149599dedb08a89ddf567805864b405f5208a355af3c
                 - name: SRIOV_INFINIBAND_CNI_IMAGE
-                  value: quay.io/openshift/origin-sriov-infiniband-cni:4.17
+                  value: registry.redhat.io/openshift4/ose-sriov-infiniband-cni-rhel9@sha256:96d1b2f29737ef849afde2c425a6849a955e8d1c35cd6e5f7ab29240ac14c056
                 - name: RESOURCE_PREFIX
                   value: openshift.io
                 - name: ADMISSION_CONTROLLERS_ENABLED
@@ -394,9 +394,9 @@ spec:
                 - name: ADMISSION_CONTROLLERS_CERTIFICATES_INJECTOR_SECRET_NAME
                   value: network-resources-injector-secret
                 - name: METRICS_EXPORTER_IMAGE
-                  value: quay.io/openshift/origin-sriov-network-metrics-exporter:4.17
+                  value: registry-proxy.engineering.redhat.com/rh-osbs/openshift-ose-sriov-network-metrics-exporter-rhel9@sha256:97a2b015996fa7cd09794360077dcd0087892a96071e1008e01612f01db47f44
                 - name: METRICS_EXPORTER_KUBE_RBAC_PROXY_IMAGE
-                  value: quay.io/openshift/origin-kube-rbac-proxy:4.17
+                  value: registry-proxy.engineering.redhat.com/rh-osbs/openshift-ose-kube-rbac-proxy-rhel9@sha256:29201e85bd41642b72c7c0ce915e40aad90823d0efc3e7bbab9c351c92c74341
                 - name: METRICS_EXPORTER_SECRET_NAME
                   value: metrics-exporter-cert
                 - name: METRICS_EXPORTER_PROMETHEUS_OPERATOR_NAMESPACE
@@ -419,7 +419,7 @@ spec:
                       fieldPath: metadata.name
                 - name: RELEASE_VERSION
                   value: 4.17.0
-                image: quay.io/openshift/origin-sriov-network-operator:4.17
+                image: quay.io/apanatto/sriov-network-operator@sha256:70c4a86c25eab3227b1e3388a6ceffd65b01d941dab661c7e3382e09fd0d1b35
                 imagePullPolicy: IfNotPresent
                 livenessProbe:
                   httpGet:
