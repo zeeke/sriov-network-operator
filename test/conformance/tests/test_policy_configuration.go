@@ -657,9 +657,9 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 
 					secondPod = waitForPodRunning(secondPod)
 
-					stdout, stderr, err = pod.ExecCommand(clients, secondPod,
-						"ping", firstPodIPs[0], "-s", "8972", "-M", "do", "-c", "2")
-					Expect(err).ToNot(HaveOccurred(), "Failed to ping first pod", stderr)
+					pingCommand := []string{"ping", firstPodIPs[0], "-s", "8972", "-M", "do", "-c", "2"}
+					stdout, stderr, err = pod.ExecCommand(clients, secondPod, pingCommand...)
+					Expect(err).ToNot(HaveOccurred(), "Failed to ping first pod. cmd%v stdout[%s] stderr[%s]", pingCommand, stdout, stderr)
 					Expect(stdout).To(ContainSubstring("2 packets transmitted, 2 received, 0% packet loss"))
 				})
 			})
