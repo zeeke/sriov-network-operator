@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -39,8 +41,10 @@ var _ = BeforeSuite(func() {
 	err = namespaces.Clean(operatorNamespace, namespaces.Test, clients, discovery.Enabled())
 	Expect(err).ToNot(HaveOccurred())
 	WaitForSRIOVStable()
-	sriovInfos, err = cluster.DiscoverSriov(clients, operatorNamespace)
-	Expect(err).ToNot(HaveOccurred())
+	Eventually(func(g Gomega) {
+		sriovInfos, err = cluster.DiscoverSriov(clients, operatorNamespace)
+		g.Expect(err).ToNot(HaveOccurred())
+	}).WithTimeout(5*time.Minute).WithPolling(10*time.Second).Should(Succeed())
 })
 
 var _ = AfterSuite(func() {
