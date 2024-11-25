@@ -621,7 +621,7 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 				})
 
 				// 27662
-				It("Should support jumbo frames", func() {
+				FIt("Should support jumbo frames", func() {
 					podDefinition := pod.DefineWithNetworks([]string{"test-mtuvolnetwork"})
 					firstPod, err := clients.Pods(namespaces.Test).Create(context.Background(), podDefinition, metav1.CreateOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -656,6 +656,36 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 					Expect(err).ToNot(HaveOccurred())
 
 					secondPod = waitForPodRunning(secondPod)
+
+
+					stdout, _, _ = pod.ExecCommand(clients, firstPod, []string{"ip", "link"}...)
+					fmt.Println(stdout)
+					stdout, _, _ = pod.ExecCommand(clients, firstPod, []string{"ip", "route"}...)
+					fmt.Println(stdout)
+					stdout, _, _ = pod.ExecCommand(clients, firstPod, []string{"ip", "address"}...)
+					fmt.Println(stdout)
+
+					stdout, _, _ = pod.ExecCommand(clients, secondPod, []string{"ip", "link"}...)
+					fmt.Println(stdout)
+					stdout, _, _ = pod.ExecCommand(clients, secondPod, []string{"ip", "route"}...)
+					fmt.Println(stdout)
+					stdout, _, _ = pod.ExecCommand(clients, secondPod, []string{"ip", "address"}...)
+					fmt.Println(stdout)
+
+					stdout, stderr, err = pod.ExecCommand(clients, secondPod, []string{"ping", firstPodIPs[0], "-s", "8972", "-c", "2"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
+
+					stdout, stderr, err = pod.ExecCommand(clients, secondPod, []string{"ping", firstPodIPs[0], "-c", "2"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
+
+					stdout, stderr, err = runCommandOnConfigDaemon(sriovInfos.Nodes[0], []string{"ip", "link"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
 
 					pingCommand := []string{"ping", firstPodIPs[0], "-s", "8972", "-M", "do", "-c", "2"}
 					stdout, stderr, err = pod.ExecCommand(clients, secondPod, pingCommand...)
