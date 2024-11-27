@@ -602,6 +602,7 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 							ResourceName:     resourceName,
 							IPAM:             `{"type":"host-local","subnet":"10.10.10.0/24","rangeStart":"10.10.10.171","rangeEnd":"10.10.10.181","routes":[{"dst":"10.10.10.0/24"}],"gateway":"10.10.10.1"}`,
 							NetworkNamespace: namespaces.Test,
+							LogLevel: "debug",
 						}}
 
 					// We need this to be able to run the connectivity checks on Mellanox cards
