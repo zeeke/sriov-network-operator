@@ -683,6 +683,17 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 					fmt.Println(stderr)
 					fmt.Println(err)
 
+					stdout, stderr, err = pod.ExecCommand(clients, secondPod, []string{"ping", firstPodIPs[0], "-c", "2"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
+
+					fmt.Println("Self ping first pod")
+					stdout, stderr, err = pod.ExecCommand(clients, firstPod, []string{"ping", firstPodIPs[0], "-c", "2"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
+
 					stdout, stderr, err = runCommandOnConfigDaemon(sriovInfos.Nodes[0], []string{"ip", "link"}...)
 					fmt.Println(stdout)
 					fmt.Println(stderr)
