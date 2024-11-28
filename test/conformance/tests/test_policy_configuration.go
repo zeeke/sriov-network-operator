@@ -699,6 +699,17 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 					fmt.Println(stderr)
 					fmt.Println(err)
 
+
+					secondPodIPs, err := network.GetSriovNicIPs(secondPod, "net1")
+					Expect(err).ToNot(HaveOccurred())
+					Expect(len(firstPodIPs)).To(Equal(1))
+
+					fmt.Println("First -> Second ping")
+					stdout, stderr, err = pod.ExecCommand(clients, firstPod, []string{"ping", secondPodIPs[0], "-c", "2"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
+
 					pingCommand := []string{"ping", firstPodIPs[0], "-s", "8972", "-M", "do", "-c", "2"}
 					stdout, stderr, err = pod.ExecCommand(clients, secondPod, pingCommand...)
 					Expect(err).ToNot(HaveOccurred(), "Failed to ping first pod. cmd%v stdout[%s] stderr[%s]", pingCommand, stdout, stderr)
