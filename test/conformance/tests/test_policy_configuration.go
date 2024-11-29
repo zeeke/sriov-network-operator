@@ -555,7 +555,17 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 						if err != nil {
 							Skip(err.Error())
 						}
-						intf = unusedSriovDevices[0]
+
+						lowerUpDevices, err := findLowerUpDevices(node, unusedSriovDevices)
+						if err != nil {
+							Skip(err.Error())
+						}
+
+						if len(lowerUpDevices) == 0 {
+							Skip("No working NIC found")
+						}
+
+						intf = lowerUpDevices[0]
 						By("Using device " + intf.Name + " on node " + node)
 
 						mtuPolicy := &sriovv1.SriovNetworkNodePolicy{
@@ -602,7 +612,7 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 							ResourceName:     resourceName,
 							IPAM:             `{"type":"host-local","subnet":"10.10.10.0/24","rangeStart":"10.10.10.171","rangeEnd":"10.10.10.181","routes":[{"dst":"10.10.10.0/24"}],"gateway":"10.10.10.1"}`,
 							NetworkNamespace: namespaces.Test,
-							LogLevel: "debug",
+							LogLevel:         "debug",
 						}}
 
 					// We need this to be able to run the connectivity checks on Mellanox cards
@@ -658,7 +668,6 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 
 					secondPod = waitForPodRunning(secondPod)
 
-
 					stdout, _, _ = pod.ExecCommand(clients, firstPod, []string{"ip", "link"}...)
 					fmt.Println(stdout)
 					stdout, _, _ = pod.ExecCommand(clients, firstPod, []string{"ip", "route"}...)
@@ -698,7 +707,6 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 					fmt.Println(stdout)
 					fmt.Println(stderr)
 					fmt.Println(err)
-
 
 					secondPodIPs, err := network.GetSriovNicIPs(secondPod, "net1")
 					Expect(err).ToNot(HaveOccurred())

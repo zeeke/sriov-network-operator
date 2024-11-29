@@ -1871,6 +1871,28 @@ func findUnusedSriovDevices(testNode string, sriovDevices []*sriovv1.InterfaceEx
 	return filteredDevices, nil
 }
 
+func findLowerUpDevices(testNode string, sriovDevices []*sriovv1.InterfaceExt) ([]*sriovv1.InterfaceExt, error) {
+	filteredDevices := []*sriovv1.InterfaceExt{}
+
+	for _, device := range sriovDevices {
+		command := []string{"chroot", "/host", "ip", "link", "show", "dev", device.Name}
+		output, stderr, err := runCommandOnConfigDaemon(testNode, command...)
+		if err != nil {
+			return nil, fmt.Errorf("failed running %v on node %s: %w\n%s\n%s", command, testNode, err, output, stderr)
+		}
+
+		fmt.Println(device.Name)
+		fmt.Println(output)
+		if strings.Contains(output, "LOWER_UP") {
+			filteredDevices = append(filteredDevices, device)
+		}
+	}
+
+	return filteredDevices, nil
+}
+
+
+
 func isDefaultRouteInterface(intfName string, routes []string) bool {
 	for _, route := range routes {
 		if strings.HasPrefix(route, "default") && strings.Contains(route, "dev "+intfName) {
