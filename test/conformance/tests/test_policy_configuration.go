@@ -504,12 +504,13 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 			})
 
 			Context("MTU", func() {
+				var intf *sriovv1.InterfaceExt
+
 				BeforeEach(func() {
 
 					var node string
 					resourceName := "mturesource"
 					var numVfs int
-					var intf *sriovv1.InterfaceExt
 					var err error
 
 					if discovery.Enabled() {
@@ -610,7 +611,7 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 						},
 						Spec: sriovv1.SriovNetworkSpec{
 							ResourceName:     resourceName,
-							IPAM:             `{"type":"host-local","subnet":"10.10.10.0/24","rangeStart":"10.10.10.171","rangeEnd":"10.10.10.181","routes":[{"dst":"10.10.10.0/24"}],"gateway":"10.10.10.1"}`,
+							IPAM:             `{"type":"host-local","subnet":"10.10.10.0/24","rangeStart":"10.10.10.171","rangeEnd":"10.10.10.181","routes":[{"dst":"10.10.10.0/24"}],"gateway":"0.0.0.0"}`,
 							NetworkNamespace: namespaces.Test,
 							LogLevel:         "debug",
 						}}
@@ -703,7 +704,7 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 					fmt.Println(stderr)
 					fmt.Println(err)
 
-					stdout, stderr, err = runCommandOnConfigDaemon(sriovInfos.Nodes[0], []string{"ip", "link"}...)
+					stdout, stderr, err = runCommandOnConfigDaemon(sriovInfos.Nodes[0], []string{"chroot", "/host", "ip", "link"}...)
 					fmt.Println(stdout)
 					fmt.Println(stderr)
 					fmt.Println(err)
@@ -717,6 +718,19 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 					fmt.Println(stdout)
 					fmt.Println(stderr)
 					fmt.Println(err)
+
+					fmt.Println("ARP first")
+					stdout, stderr, err = pod.ExecCommand(clients, firstPod, []string{"cat", "/proc/net/arp"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
+
+					fmt.Println("ARP second")
+					stdout, stderr, err = pod.ExecCommand(clients, secondPod, []string{"cat", "/proc/net/arp"}...)
+					fmt.Println(stdout)
+					fmt.Println(stderr)
+					fmt.Println(err)
+
 
 					pingCommand := []string{"ping", firstPodIPs[0], "-s", "8972", "-M", "do", "-c", "2"}
 					stdout, stderr, err = pod.ExecCommand(clients, secondPod, pingCommand...)
