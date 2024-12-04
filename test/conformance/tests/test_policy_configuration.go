@@ -611,7 +611,7 @@ var _ = Describe("[sriov] operator", Ordered, func() {
 						},
 						Spec: sriovv1.SriovNetworkSpec{
 							ResourceName:     resourceName,
-							IPAM:             `{"type":"host-local","subnet":"10.10.10.0/24","rangeStart":"10.10.10.171","rangeEnd":"10.10.10.181","routes":[{"dst":"10.10.10.0/24"}],"gateway":"0.0.0.0"}`,
+							IPAM:             `{"type":"host-local","subnet":"10.10.10.0/24","rangeStart":"10.10.10.171","rangeEnd":"10.10.10.181","routes":[{"dst":"0.0.0.0/0"}],"gateway":"10.10.10.1"}`,
 							NetworkNamespace: namespaces.Test,
 							LogLevel:         "debug",
 						}}
