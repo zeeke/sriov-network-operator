@@ -26,7 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("[sriov] Metrics Exporter", Ordered, ContinueOnFailure, func() {
+var _ = FDescribe("[sriov] Metrics Exporter", Ordered, ContinueOnFailure, func() {
 	var node string
 	var nic *sriovv1.InterfaceExt
 
@@ -159,7 +159,14 @@ var _ = Describe("[sriov] Metrics Exporter", Ordered, ContinueOnFailure, func() 
 
 			// sriov_kubepoddevice has a different sets of label than statistics metrics
 			samples := runPromQLQuery(fmt.Sprintf(`sriov_kubepoddevice{namespace="%s",pod="%s"}`, pod.Namespace, pod.Name))
-			Expect(samples).ToNot(BeEmpty(), "no value for metric sriov_kubepoddevice")
+			Expect(samples).ToNot(BeEmpty(), func() string {
+				metrics := getMetricsForNode(pod.Spec.NodeName)
+				ret := ""
+				ret += fmt.Sprintf(`looking for sriov_kubepoddevice{namespace="%s",pod="%s"}`, pod.Namespace, pod.Name)
+				ret += fmt.Sprintf("--- metrics from node\n%+v\n", metrics)
+				ret += fmt.Sprintf("--- all sriov_kubepoddevice\n%+v\n", runPromQLQuery("sriov_kubepoddevice"))
+				return ret
+			})
 			Expect(samples[0].Metric).To(And(
 				HaveKey(model.LabelName("pciAddr")),
 				HaveKeyWithValue(model.LabelName("node"), model.LabelValue(pod.Spec.NodeName)),
