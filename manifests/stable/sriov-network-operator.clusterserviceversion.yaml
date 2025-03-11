@@ -381,7 +381,7 @@ spec:
                 - name: OPERATOR_NAME
                   value: sriov-network-operator
                 - name: SRIOV_NETWORK_CONFIG_DAEMON_IMAGE
-                  value: quay.io/openshift/origin-sriov-network-config-daemon:4.18
+                  value: quay.io/apanatto/sriov-network-config-daemon:logfix-418-0311
                 - name: SRIOV_NETWORK_WEBHOOK_IMAGE
                   value: quay.io/openshift/origin-sriov-network-webhook:4.18
                 - name: SRIOV_INFINIBAND_CNI_IMAGE
@@ -425,8 +425,8 @@ spec:
                     fieldRef:
                       fieldPath: metadata.name
                 - name: RELEASE_VERSION
-                  value: 4.18.0
-                image: quay.io/openshift/origin-sriov-network-operator:4.18
+                  value: 4.19.0
+                image: quay.io/apanatto/sriov-network-operator:logfix-418-0311
                 imagePullPolicy: IfNotPresent
                 livenessProbe:
                   httpGet:

@@ -9,4 +9,5 @@ COPY --from=builder /go/src/github.com/k8snetworkplumbingwg/sriov-network-operat
 COPY --from=builder /go/src/github.com/k8snetworkplumbingwg/sriov-network-operator/build/_output/cmd/sriov-network-operator-config-cleanup /usr/bin/sriov-network-operator-config-cleanup
 COPY bindata /bindata
 ENV OPERATOR_NAME=sriov-network-operator
+ENV CLUSTER_TYPE=openshift
 CMD ["/usr/bin/sriov-network-operator"]
