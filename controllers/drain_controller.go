@@ -54,6 +54,7 @@ var (
 		MaxUnavailable: &oneNode,
 		NodeSelector:   &metav1.LabelSelector{}}}
 )
+var requeTime time.Duration = 100 * time.Millisecond
 
 type DrainReconcile struct {
 	client.Client
@@ -161,7 +162,7 @@ func (dr *DrainReconcile) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 					"DrainController",
 					"node complete drain was not completed")
 				// TODO: make this time configurable
-				return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+				return reconcile.Result{RequeueAfter: requeTime}, nil
 			}
 
 			// move the node state back to idle
@@ -219,7 +220,7 @@ func (dr *DrainReconcile) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 				corev1.EventTypeWarning,
 				"DrainController",
 				"node drain operation was not completed")
-			return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+			return reconcile.Result{RequeueAfter: requeTime}, nil
 		}
 
 		// if we manage to drain we label the node state with drain completed and finish
@@ -328,7 +329,7 @@ func (dr *DrainReconcile) tryDrainNode(ctx context.Context, node *corev1.Node) (
 		// the node requested to be drained, but we are at the limit so we re-enqueue the request
 		reqLogger.Info("MaxParallelNodeConfiguration limit reached for draining nodes re-enqueue the request")
 		// TODO: make this time configurable
-		return &reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+		return &reconcile.Result{RequeueAfter: requeTime}, nil
 	}
 
 	if currentSnns == nil {

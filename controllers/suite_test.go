@@ -46,6 +46,7 @@ import (
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/vars"
 	"github.com/k8snetworkplumbingwg/sriov-network-operator/test/util"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
@@ -63,6 +64,7 @@ const testNamespace = "openshift-sriov-network-operator"
 func setupK8sManagerForTest() (manager.Manager, error) {
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
+		Cache:  cache.Options{DefaultNamespaces: map[string]cache.Config{vars.Namespace: {}}},
 	})
 
 	if err != nil {
@@ -85,6 +87,7 @@ var _ = BeforeSuite(func() {
 
 	logf.SetLogger(zap.New(
 		zap.WriteTo(GinkgoWriter),
+		zap.Level(zapcore.Level(-2)),
 		zap.UseDevMode(true),
 		func(o *zap.Options) {
 			o.TimeEncoder = zapcore.RFC3339NanoTimeEncoder

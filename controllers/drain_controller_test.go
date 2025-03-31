@@ -2,7 +2,10 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -315,8 +318,82 @@ var _ = Describe("Drain Controller", Ordered, func() {
 			expectNodeStateAnnotation(nodeState2, constants.Draining)
 			expectNodeStateAnnotation(nodeState1, constants.Draining)
 		})
+
+		FIt("should sequentially drain many nodes", func(ctx context.Context) {
+			var nodes []*corev1.Node
+			var nodeStates []*sriovnetworkv1.SriovNetworkNodeState
+			for i := 0; i < 40; i++ {
+				node, nodeState := createNode(ctx, fmt.Sprintf("node-%02d", i))
+				nodes = append(nodes, node)
+				nodeStates = append(nodeStates, nodeState)
+			}
+
+			//ctx, cancel := context.WithCancel(context.Background())
+			//defer cancel()
+			//go noise(ctx, nodes, nodeStates)
+
+			var wg sync.WaitGroup
+			for i := range nodes {
+				wg.Add(1)
+				k := i
+				go func() {
+					defer GinkgoRecover()
+					defer wg.Done()
+					cycleRebootRequired(nodes[k], nodeStates[k], 5*time.Second)
+				}()
+			}
+
+			wg.Wait()
+
+			Fail("xxx")
+		})
 	})
 })
+
+func cycleRebootRequired(node *corev1.Node, nodeState *sriovnetworkv1.SriovNetworkNodeState, rebootTime time.Duration) {
+	simulateDaemonSetAnnotation(node, constants.RebootRequired)
+	waitNodeStateAnnotation(nodeState, constants.DrainComplete, 100*rebootTime)
+	expectNodeIsNotSchedulable(node)
+
+	time.Sleep(rebootTime)
+
+	simulateDaemonSetAnnotation(node, constants.DrainIdle)
+	waitNodeStateAnnotation(nodeState, constants.DrainIdle, 10*time.Second)
+	expectNodeIsSchedulable(node)
+}
+
+func noise(ctx context.Context, nodes []*corev1.Node, nodeStates []*sriovnetworkv1.SriovNetworkNodeState) {
+	tickerNode := time.NewTicker(time.Second)
+	tickerNodeState := time.NewTicker(3 * time.Second)
+	for {
+		select {
+		case <-tickerNode.C:
+			i := rand.IntN(len(nodes))
+			Expect(
+				utils.AnnotateObject(context.Background(), nodes[i], fmt.Sprintf("xxx%d", rand.IntN(100)), fmt.Sprintf("vvv%d", rand.IntN(100)), k8sClient)).
+				ToNot(HaveOccurred())
+		case <-tickerNodeState.C:
+			i := rand.IntN(len(nodes))
+			Expect(
+				utils.AnnotateObject(context.Background(), nodeStates[i], fmt.Sprintf("xxx%d", rand.IntN(100)), fmt.Sprintf("vvv%d", rand.IntN(100)), k8sClient)).
+				ToNot(HaveOccurred())
+		case <-ctx.Done():
+			return
+		}
+	}
+
+}
+
+func waitNodeStateAnnotation(nodeState *sriovnetworkv1.SriovNetworkNodeState, expectedAnnotationValue string, timeout time.Duration) {
+	EventuallyWithOffset(1, func(g Gomega) {
+		g.Expect(k8sClient.Get(context.Background(), types.NamespacedName{Namespace: nodeState.Namespace, Name: nodeState.Name}, nodeState)).
+			ToNot(HaveOccurred())
+
+		g.Expect(utils.ObjectHasAnnotation(nodeState, constants.NodeStateDrainAnnotationCurrent, expectedAnnotationValue)).
+			To(BeTrue(),
+				"Node[%s] annotation[%s] == '%s'. Expected '%s'", nodeState.Name, constants.NodeStateDrainAnnotationCurrent, nodeState.GetLabels()[constants.NodeStateDrainAnnotationCurrent], expectedAnnotationValue)
+	}).WithPolling(time.Second).WithTimeout(timeout).Should(Succeed())
+}
 
 func expectNodeStateAnnotation(nodeState *sriovnetworkv1.SriovNetworkNodeState, expectedAnnotationValue string) {
 	EventuallyWithOffset(1, func(g Gomega) {
@@ -325,7 +402,7 @@ func expectNodeStateAnnotation(nodeState *sriovnetworkv1.SriovNetworkNodeState, 
 
 		g.Expect(utils.ObjectHasAnnotation(nodeState, constants.NodeStateDrainAnnotationCurrent, expectedAnnotationValue)).
 			To(BeTrue(),
-				"Node[%s] annotation[%s] == '%s'. Expected '%s'", nodeState.Name, constants.NodeDrainAnnotation, nodeState.GetLabels()[constants.NodeStateDrainAnnotationCurrent], expectedAnnotationValue)
+				"Node[%s] annotation[%s] == '%s'. Expected '%s'", nodeState.Name, constants.NodeStateDrainAnnotationCurrent, nodeState.GetLabels()[constants.NodeStateDrainAnnotationCurrent], expectedAnnotationValue)
 	}, "20s", "1s").Should(Succeed())
 }
 
