@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": [
+    "regex"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Makefile.bundle$/",
+        "/^bundle/manifests/sriov-network-operator.clusterserviceversion.yaml$/",
+        "/^config/manifests/bases/sriov-network-operator.clusterserviceversion.yaml$/"
+      ],
+      "matchStrings": [
+        "VERSION \\?= (?<currentValue>.*?)\n",
+        "containerImage: quay.io/openshift/origin-sriov-network-operator:(?<currentValue>.*?)\n"
+      ],
+      "packageNameTemplate": "openshift-release",
+      "datasourceTemplate": "custom.openshift-release"
+    }
+  ],
+  "customDatasources": {
+    "openshift-release": {
+      "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/openshift/release/master/core-services/jira-lifecycle-plugin/config.yaml",
+      "format": "yaml",
+      "transformTemplates": [
+        "{\"releases\": [{\"version\": $.default['*'].main.target_version }], \"sourceUrl\":\"https://raw.githubusercontent.com/openshift/release/master/core-services/jira-lifecycle-plugin/config.yaml\"}"
+      ]
+    }
+  }
+}
