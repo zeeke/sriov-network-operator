@@ -8,12 +8,18 @@
       "customType": "regex",
       "managerFilePatterns": [
         "/^Makefile.bundle$/",
+        "/^config/manager/manager.yaml$/",
+        "/^config/manifests/bases/sriov-network-operator.clusterserviceversion.yaml$/",
         "/^bundle/manifests/sriov-network-operator.clusterserviceversion.yaml$/",
-        "/^config/manifests/bases/sriov-network-operator.clusterserviceversion.yaml$/"
+        "/^manifests/stable/image-references$/",
+        "/^manifests/sriov-network-operator.package.yaml$/",
+        "/^pkg/version/version.go$/"
       ],
       "matchStrings": [
-        "VERSION \\?= (?<currentValue>.*?)\n",
-        "containerImage: quay.io/openshift/origin-sriov-network-operator:(?<currentValue>.*?)\n"
+        "VERSION \\?= (?<currentValue>.*?).0\n",
+        "quay.io/openshift/.*:(?<currentValue>.*?)\n",
+        "olm.skipRange: '>=4.3.0-0 <(?<currentValue>.*?).0'\n",
+        "\"v(?<currentValue>.*?).0\""
       ],
       "packageNameTemplate": "openshift-release",
       "datasourceTemplate": "custom.openshift-release"
@@ -24,7 +30,7 @@
       "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/openshift/release/master/core-services/jira-lifecycle-plugin/config.yaml",
       "format": "yaml",
       "transformTemplates": [
-        "{\"releases\": [{\"version\": $.default['*'].main.target_version }], \"sourceUrl\":\"https://raw.githubusercontent.com/openshift/release/master/core-services/jira-lifecycle-plugin/config.yaml\"}"
+        "{\"releases\": [{\"version\": $replace($.default['*'].main.target_version, \".0\", \"\") }], \"sourceUrl\":\"https://raw.githubusercontent.com/openshift/release/master/core-services/jira-lifecycle-plugin/config.yaml\"}"
       ]
     }
   }
