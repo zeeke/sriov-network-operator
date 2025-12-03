@@ -12,5 +12,4 @@ LABEL io.k8s.display-name="OpenShift sriov-network-config-daemon" \
 COPY --from=builder /go/src/github.com/k8snetworkplumbingwg/sriov-network-operator/build/_output/cmd/sriov-network-config-daemon /usr/bin/
 COPY bindata /bindata
 ENV PLUGINSPATH=/plugins
-ENV CLUSTER_TYPE=openshift
 CMD ["/usr/bin/sriov-network-config-daemon"]
