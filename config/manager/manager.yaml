@@ -114,3 +114,5 @@ spec:
                 fieldPath: metadata.name
           - name: RELEASE_VERSION
             value: 4.21.0
+          - name: CLUSTER_TYPE
+            value: openshift
