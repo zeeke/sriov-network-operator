@@ -1,0 +1,37 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": ["custom.regex"],
+  "customDatasources": {
+    "ocp-version": {
+      "defaultRegistryUrlTemplate": "https://api.github.com/repos/openshift/sriov-network-operator/branches?per_page=100",
+      "transformTemplates": [
+        "{\"releases\": $[name ~> /^release-(\\d+\\.\\d+)$/].{\"version\": $match(name, /release-(.+)/).groups[0]}}"
+      ]
+    }
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "^Makefile\\.bundle$",
+        "^config/manager/manager\\.yaml$",
+        "^config/manifests/bases/.+\\.yaml$",
+        "^manifests/.+$",
+        "^bundle/manifests/.+\\.yaml$",
+        "^pkg/version/version\\.go$"
+      ],
+      "matchStrings": [
+        "quay\\.io/openshift/origin-[\\w-]+:(?<currentValue>\\d+\\.\\d+)",
+        "VERSION \\?= (?<currentValue>\\d+\\.\\d+)\\.0",
+        "Raw = \"v(?<currentValue>\\d+\\.\\d+)\\.0\"",
+        "MustParse\\(\"(?<currentValue>\\d+\\.\\d+)\\.0\"\\)",
+        "RELEASE_VERSION\\n\\s+value: (?<currentValue>\\d+\\.\\d+)\\.0",
+        "sriov-network-operator\\.v(?<currentValue>[1-9]\\d*\\.\\d+)\\.0",
+        "olm\\.skipRange: '>=4\\.3\\.0-0 <(?<currentValue>\\d+\\.\\d+)\\.0'",
+        "\\n  version: (?<currentValue>\\d+\\.\\d+)\\.0"
+      ],
+      "depNameTemplate": "ocp-operator-version",
+      "datasourceTemplate": "custom.ocp-version"
+    }
+  ]
+}
